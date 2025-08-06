@@ -1,0 +1,1 @@
+{ "prompt": "text", "text": "text", "task": "task", "voice": "voice", "max_new_token": "max_new_token", "temperature": "temperature", "top_k": "top_k", "top_p": "top_p", "token_length": "token_length"}

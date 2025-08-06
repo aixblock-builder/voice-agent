@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="vi">
+
+<head>
+    <meta charset="UTF-8">
+    <title>WebSocket TTS Client (Fixed Audio)</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            padding: 20px;
+        }
+
+        #logs,
+        #result {
+            white-space: pre-wrap;
+            background-color: #f4f4f4;
+            border: 1px solid #ccc;
+            padding: 10px;
+            margin-top: 10px;
+            min-height: 100px;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>WebSocket TTS Client (Âm thanh đã sửa)</h1>
+    <button onclick="startTTS()">Bắt đầu TTS Stream</button>
+
+    <h3>Trạng thái phát:</h3>
+    <div id="logs"></div>
+
+    <h3>Nội dung hội thoại:</h3>
+    <div id="result"></div>
+
+    <script>
+        const logsDiv = document.getElementById('logs');
+        const resultDiv = document.getElementById('result');
+        let ws;
+
+        let audioQueue = [];
+        let isPlaying = false;
+
+        function log(message) {
+            logsDiv.innerHTML += `<p>${new Date().toLocaleTimeString()}: ${message}</p>`;
+            logsDiv.scrollTop = logsDiv.scrollHeight;
+        }
+
+        async function startTTS() {
+            if (!ws) {
+                const ws = await new WebSocket("/ws/generate-audio"); // Sửa URL nếu cần
+            }
+
+            ws.onopen = function (event) {
+                log("Kết nối đã mở. Đang gửi yêu cầu...");
+                const requestData = {
+                    text: "Hello world. This is a streaming test to see if the audio plays correctly.",
+                    speaker_wav: "example_female.wav", // Thay đổi đường dẫn này
+                    language: "en"
+                };
+                ws.send(JSON.stringify(requestData));
+                resultDiv.textContent = "User: " + requestData.text + "\n";
+            };
+
+            ws.onmessage = function (event) {
+                const data = JSON.parse(event.data);
+
+                if (data.error) {
+                    log(`Lỗi từ Server: ${data.error}`);
+                    return;
+                }
+
+                handleAudioData(data.audio, data.text, data.text_index, data.is_last);
+
+                if (data.is_last) {
+                    log("Streaming từ server đã kết thúc.");
+                }
+            };
+
+            ws.onclose = function (event) {
+                log("Kết nối đã đóng.");
+            };
+
+            ws.onerror = function (event) {
+                log("Lỗi WebSocket.");
+                console.error("WebSocket Error:", event);
+            };
+        }
+
+        // --- CÁC HÀM XỬ LÝ ÂM THANH MÀ BẠN CUNG CẤP ---
+
+        function handleAudioData(byteArray, sentence, index, isLast) {
+            log(`Đã nhận câu ${index}: "${sentence}"`);
+            // Chuyển mảng số nguyên thành mảng byte
+            const pcmData = new Uint8Array(byteArray);
+            // Thêm WAV header để tạo file WAV hợp lệ
+            const wavBuffer = addWavHeader(pcmData, 22050, 1); // Điều chỉnh sample rate/channels nếu cần
+            const blob = new Blob([wavBuffer], { type: "audio/wav" });
+
+            // Thêm vào hàng đợi để phát
+            audioQueue.push({ blob, sentence });
+
+            // Nếu không có gì đang phát, bắt đầu phát ngay
+            if (!isPlaying) {
+                playNextAudio();
+            }
+        }
+
+        function playNextAudio() {
+            if (isPlaying || audioQueue.length === 0) return;
+
+            isPlaying = true;
+
+            const { blob, sentence } = audioQueue.shift();
+            const url = URL.createObjectURL(blob);
+            const audio = new Audio(url);
+
+            resultDiv.textContent += "Assistant: " + sentence + " ";
+            log(`Đang phát: "${sentence}"`);
+
+            audio.onended = () => {
+                URL.revokeObjectURL(url);
+                isPlaying = false;
+                playNextAudio(); // Tự động phát câu tiếp theo trong hàng đợi
+            };
+
+            audio.onerror = (e) => {
+                console.error("Lỗi audio:", e);
+                URL.revokeObjectURL(url);
+                isPlaying = false;
+                playNextAudio(); // Thử phát câu tiếp theo dù có lỗi
+            };
+
+            audio.play().catch((err) => {
+                console.error("Lỗi khi gọi .play():", err);
+                isPlaying = false;
+            });
+        }
+
+        function addWavHeader(pcmData, sampleRate = 22050, channels = 1) {
+            const numSamples = pcmData.length / 2;
+            const dataSize = numSamples * channels * 2;
+            const buffer = new ArrayBuffer(44 + pcmData.length);
+            const view = new DataView(buffer);
+
+            const writeString = (offset, str) => {
+                for (let i = 0; i < str.length; i++) {
+                    view.setUint8(offset + i, str.charCodeAt(i));
+                }
+            };
+
+            writeString(0, "RIFF");
+            view.setUint32(4, 36 + pcmData.length, true);
+            writeString(8, "WAVE");
+            writeString(12, "fmt ");
+            view.setUint32(16, 16, true);
+            view.setUint16(20, 1, true); // PCM
+            view.setUint16(22, channels, true);
+            view.setUint32(24, sampleRate, true);
+            view.setUint32(28, sampleRate * channels * 2, true); // byteRate
+            view.setUint16(32, channels * 2, true); // blockAlign
+            view.setUint16(34, 16, true); // bitsPerSample
+            writeString(36, "data");
+            view.setUint32(40, pcmData.length, true);
+            new Uint8Array(buffer, 44).set(pcmData);
+
+            return buffer;
+        }
+    </script>
+</body>
+
+</html>

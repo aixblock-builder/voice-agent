@@ -1,0 +1,308 @@
+openapi: 3.0.3
+# note: 3.1.0 required for requestBody on DELETE
+# which we should maybe move away from
+info:
+  title: ML API
+  description: The REST API for MACHINE LEARNING 
+  license:
+    name: BSD-3-Clause
+  version: 1.0.0.dev
+servers:
+  - url: /
+security:
+  - token: []
+  - oauth2:
+      - self
+paths:
+  /:
+    get: 
+      summary: ML API version and info
+      description: |
+        This endpoint is not authenticated for the purpose of clients and user
+        to identify the JupyterHub version before setting up authentication.
+      responses:
+        200:
+          description: The ML API version
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version:
+                    type: string
+                    description: The version of ML API itself
+  /action:
+      post:
+        summary: to fine-tune/predict/call inference endpoint
+        requestBody:
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  command:
+                    type: string
+                    description: The action to perform, e.g., train, predict, etc.
+                    example: train
+                  params:
+                    type: object
+                    description: Configuration parameters for the action
+                    properties:
+                      login:
+                        type: string
+                        nullable: true
+                        description: Login credentials (optional)
+                        example: null
+                      password:
+                        type: string
+                        nullable: true
+                        description: Password credentials (optional)
+                        example: null
+                      project_id:
+                        type: integer
+                        description: The ID of the project
+                        example: 286
+                      dataset:
+                        type: integer
+                        description: Dataset identifier
+                        example: 0
+                      dataset_version:
+                        type: string
+                        nullable: true
+                        description: Version of the dataset
+                        example: null
+                      checkpoint:
+                        type: string
+                        description: Path to the checkpoint
+                        example: ""
+                      task:
+                        type: string
+                        description: Machine learning task type
+                        example: speech-to-speech-translation
+                      checkpoint_version:
+                        type: string
+                        nullable: true
+                        description: Version of the checkpoint
+                        example: null
+                      token:
+                        type: string
+                        description: Authentication token
+                        example: "4b89a6ffb1f14bba6148d9167218e062b4d029dc"
+                      temperature:
+                        type: float
+                        description: temperature
+                        example: 0.9
+                      top_p:
+                        type: float
+                        description: top_p
+                        example: 0.6
+                      top_k:
+                        type: float
+                        description: top_k
+                        example: 0
+                      max_new_token:
+                        type: float
+                        description: max_new_token
+                        example: 256
+                      dataset_id:
+                        type: integer
+                        description: ID of the dataset
+                        example: 1
+                      prompt_field:
+                        type: string
+                        description: Field name for prompt data
+                        example: "prompt"
+                      text_field:
+                        type: string
+                        description: Field name for text data
+                        example: "text"
+                    additionalProperties: true
+                  project:
+                    type: string
+                    description: Identifier for the project
+                    example: "237"
+              examples:
+                predict_example:
+                  summary: Example of predicting with a model
+                  value:
+                    command: predict
+                    params:
+                      text: "Elon Reeve Musk FRS (/ˈiːlɒn/; born June 28, 1971) is a businessman known for his key roles in the space company SpaceX and the automotive company Tesla, Inc. His other involvements include ownership of X Corp., the company that operates the social media platform X (formerly Twitter), and his role in the founding of the Boring Company, xAI, Neuralink, and OpenAI. Musk is the wealthiest individual in the world; as of December 2024, Forbes estimates his net worth to be US$432 billion.[2]. A member of the wealthy South African Musk family, Musk was born in Pretoria and briefly attended the University of Pretoria before immigrating to Canada at the age of 18, acquiring citizenship through his Canadian-born mother. Two years later, he matriculated at Queen's University at Kingston in Canada. Musk later transferred to the University of Pennsylvania and received bachelor's degrees in economics and physics. He moved to California in 1995 to attend Stanford University but never enrolled in classes, and with his brother Kimbal co-founded the online city guide software company Zip2. The startup was acquired by Compaq for $307 million in 1999. That same year, Musk co-founded X.com, a direct bank. X.com merged with Confinity in 2000 to form PayPal. In 2002, Musk acquired US citizenship, and that October eBay acquired PayPal for $1.5 billion. Using $100 million of the money he made from the sale of PayPal, Musk founded SpaceX, a spaceflight services company, in 2002."
+                      prompt: "When was he born?"
+                      task: "question-answering"
+                      temperature: 0.9
+                      top_p: 0.6
+                      top_k: 0
+                      max_new_token: 256
+                    project: "102"
+
+                stop train:
+                  summary: Example of stop train
+                  value:
+                    command: action-example
+                    project: "102"
+                
+                train_example:
+                  summary: Example of training a model
+                  value:
+                    command: action-example
+                    params:
+                      login: null
+                      password: null
+                      project_id: 286
+                      dataset: 0
+                      dataset_version: null
+                      checkpoint: ""
+                      task: speech-to-speech-translation
+                      checkpoint_version: null
+                      token: "4b89a6ffb1f14bba6148d9167218e062b4d029dc"
+                      rank: 0
+                      world_size: 1
+                      master_add: "127.0.0.1"
+                      master_port: "23456"
+                      num_epochs: 1
+                      batch_size: 1
+                      image_width: "1080"
+                      image_height: "1920"
+                      imgz: 64
+                      workers: null
+                      ps: null
+                      channel_log: "ml_logs_534"
+                      configs: []
+                      token_length: "4096"
+                      accuracy: "70"
+                      precision: "fp16"
+                      sampling_frequency: "48000"
+                      mono: true
+                      fps: "74"
+                      resolution: "480"
+                      framework: huggingface
+                      TrainingArguments:
+                        model_id: "NousResearch/Llama-3.2-1B"
+                        load_in_8bit: false
+                        load_in_4bit: true
+                        strict: false
+                        dataset_id: "teknium/GPT4-LLM-Cleaned"
+                        dataset_prepared_path: "last_run_prepared"
+                        val_set_size: 0.1
+                        output_dir: "./outputs/qlora-out"
+                    project: "237"
+        responses:
+          200:
+            description: The action was successfully performed
+          400:
+            description: Invalid request parameters
+        security:
+          - oauth2:
+              - admin:actions
+        x-codegen-request-body-name: body
+                
+  /model:
+    post:
+      summary: to interact with the model directly on platform
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                params:
+                  type: object
+                  description: Configuration parameters for the action
+                  properties:
+                    login:
+                      type: string
+                      nullable: true
+                      description: Login credentials (optional)
+                      example: null
+                project:
+                  type: string
+                  description: Identifier for the project
+                  example: "237"
+                  
+            examples:
+                example1:
+                  summary: examples1
+                  value:
+                    params: 
+                      task: "text-generation"
+                    project: "102"
+                example2:
+                  summary: examples2
+                  value:
+                    params: 
+                      task: "summarization"
+                    project: "102"
+        required: true
+      responses:
+        201:
+          description: The users have been created
+
+      x-codegen-request-body-name: body
+  /model_trial:
+    post:
+      summary: to interact with the model on gradio
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                params:
+                  type: object
+                  description: Configuration parameters for the action
+                  properties:
+                    login:
+                      type: string
+                      nullable: true
+                      description: Login credentials (optional)
+                      example: null
+                project:
+                  type: string
+                  description: Identifier for the project
+                  example: "237"
+                  
+            examples:
+                example1:
+                  summary: examples1
+                  value:
+                    params: 
+                      task: "text-generation"
+                    project: "102"
+                example2:
+                  summary: examples2
+                  value:
+                    params: 
+                      task: "summarization"
+                    project: "102"
+        required: true
+      responses:
+        201:
+          description: The users have been created
+
+      x-codegen-request-body-name: body
+  /downloads:
+    get:
+      summary: to download model
+      parameters:
+        - name: path
+          in: query
+          description: The path file to download
+          required: true
+          schema:
+            type: string
+      responses:
+        201:
+          description: The users have been created
+      x-codegen-request-body-name: body
+
+  /documents:
+    get:
+      summary: Get link to the document
+      description: Returns the URL to the document (index.html).
+      responses:
+        '200':
+          description: A URL to the document
+          
+        '404':
+          description: File not found

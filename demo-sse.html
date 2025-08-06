@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>ChatGPT-like Stream</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      padding: 20px;
+      background-color: #f7f7f8;
+      color: #222;
+    }
+    textarea {
+      width: 100%;
+      height: 80px;
+      padding: 10px;
+      font-size: 16px;
+    }
+    #output {
+      white-space: pre-wrap;
+      border: 1px solid #ccc;
+      background: #fff;
+      padding: 15px;
+      margin-top: 15px;
+      height: 300px;
+      overflow-y: auto;
+      font-family: monospace;
+      font-size: 16px;
+      line-height: 1.5;
+    }
+    button {
+      margin-top: 10px;
+      padding: 10px 20px;
+      font-size: 16px;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <h2>ChatGPT-like Streaming Demo</h2>
+
+  <label for="prompt">Prompt:</label><br>
+  <textarea id="prompt">Hello, who are you?</textarea><br>
+  <button onclick="start()">Start Streaming</button>
+
+  <h3>AI Response:</h3>
+  <div id="output"></div>
+
+  <script>
+    async function start() {
+      const prompt = document.getElementById("prompt").value;
+      const outputDiv = document.getElementById("output");
+      outputDiv.innerText = "";
+      let currentText = "";
+      let renderPending = false;
+
+      // Step 1: Request stream ID
+      const res = await fetch("/action", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          command: "predict",
+          params: {
+            prompt: prompt,
+            stream: true
+          }
+        })
+      });
+
+      if (!res.ok) {
+        outputDiv.innerText = "❌ Failed to start stream.";
+        return;
+      }
+
+      const { stream_id } = await res.json();
+      const eventSource = new EventSource(`/stream/${stream_id}`);
+
+      // Step 2: Throttled rendering with requestAnimationFrame
+      function scheduleRender() {
+        if (!renderPending) {
+          renderPending = true;
+          requestAnimationFrame(() => {
+            outputDiv.textContent = currentText;
+            outputDiv.scrollTop = outputDiv.scrollHeight;
+            renderPending = false;
+          });
+        }
+      }
+
+      eventSource.addEventListener("new_token", (event) => {
+        const token = JSON.parse(event.data).token;
+        if (token === "[DONE]") {
+          eventSource.close();
+          return;
+        }
+        currentText += token;
+        scheduleRender();
+      });
+
+      eventSource.onerror = (err) => {
+        console.error("❌ SSE error:", err);
+        eventSource.close();
+      };
+    }
+  </script>
+</body>
+</html>

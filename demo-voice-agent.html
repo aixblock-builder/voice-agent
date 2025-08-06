@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="UTF-8">
+  <title>🎙️ Whisper Streaming Demo</title>
+</head>
+
+<body>
+  <h1>🎧 Real-time Speech to Text</h1>
+  <button id="start">Start Recording</button>
+  <button id="stop">Stop</button>
+  <pre id="result"></pre>
+  <audio id="player" controls autoplay></audio>
+
+  <script>
+    let audioContext;
+    let workletNode;
+    let globalStream;
+    let socket;
+
+
+    // Updated processor code: buffer + silence detection
+    const processorCode = `
+      class PCMProcessor extends AudioWorkletProcessor {
+        constructor() {
+          super();
+          this.buffer = [];
+          this.silenceFrames = 0;
+          this.SILENCE_THRESHOLD = 0.002;
+          this.SILENCE_FRAMES_LIMIT = 20;
+
+          this.port.onmessage = (event) => {
+            if (event.data === "stop") this.stopped = true;
+          };
+        }
+
+        isSilent(frame) {
+          let sum = 0;
+          for (let i = 0; i < frame.length; i++) {
+            sum += Math.abs(frame[i]);
+          }
+          const avg = sum / frame.length;
+          return avg < this.SILENCE_THRESHOLD;
+        }
+
+        process(inputs) {
+          if (this.stopped) return false;
+
+          const input = inputs[0];
+          if (input && input[0]) {
+            const float32 = input[0];
+            const isSilent = this.isSilent(float32);
+
+            const pcm16 = new Int16Array(float32.length);
+            for (let i = 0; i < float32.length; i++) {
+              const s = Math.max(-1, Math.min(1, float32[i]));
+              pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+            }
+
+            this.buffer.push(pcm16);
+
+            if (isSilent) {
+              this.silenceFrames += 1;
+            } else {
+              this.silenceFrames = 0;
+            }
+
+            if (this.silenceFrames > this.SILENCE_FRAMES_LIMIT && this.buffer.length > 0) {
+              const totalLength = this.buffer.reduce((acc, b) => acc + b.length, 0);
+              const combined = new Int16Array(totalLength);
+              let offset = 0;
+              for (const b of this.buffer) {
+                combined.set(b, offset);
+                offset += b.length;
+              }
+
+              this.port.postMessage(combined.buffer, [combined.buffer]);
+              this.buffer = [];
+              this.silenceFrames = 0;
+            }
+          }
+
+          return true;
+        }
+      }
+
+      registerProcessor('pcm-processor', PCMProcessor);
+    `;
+
+    async function setupWorklet() {
+      const blob = new Blob([processorCode], { type: "application/javascript" });
+      const blobURL = URL.createObjectURL(blob);
+      await audioContext.audioWorklet.addModule(blobURL);
+    }
+
+    document.getElementById("start").onclick = async () => {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      globalStream = stream;
+
+      audioContext = new AudioContext({ sampleRate: 16000 });
+      await setupWorklet();
+
+      socket = new WebSocket(`wss://${window.location.host}/ws/audio`);
+      const source = audioContext.createMediaStreamSource(stream);
+
+      workletNode = new AudioWorkletNode(audioContext, 'pcm-processor');
+      source.connect(workletNode);
+
+      workletNode.port.onmessage = (event) => {
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send(event.data);
+        }
+      };
+
+      socket.onmessage = (event) => {
+        document.getElementById("result").textContent += event.data + "\n";
+        fetch('/action', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            command: "predict",
+            params: {
+              prompt: event.data
+            }
+          })
+        }).then(response => {
+          if (!response.ok) {
+            throw new Error('Network response was not ok');
+          }
+          return response.json();
+        }).then(data => {
+          console.log(data)
+          const audioElement = document.getElementById("player");
+          const text = encodeURIComponent(data.result[0].result[0].value.text[0]);
+          const speaker = encodeURIComponent("example_female.wav");
+          const lang = "en";
+          audioElement.src = `/tts/tts_stream?text=${text}&speaker_wav=${speaker}&language=${lang}`;
+          audioElement.play();
+        });
+      };
+    };
+
+    document.getElementById("stop").onclick = () => {
+      if (workletNode) {
+        workletNode.port.postMessage("stop");
+        workletNode.disconnect();
+      }
+      if (globalStream) {
+        globalStream.getTracks().forEach(track => track.stop());
+      }
+    };
+  </script>
+</body>
+
+</html>
