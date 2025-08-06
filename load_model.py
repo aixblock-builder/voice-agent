@@ -5,7 +5,7 @@ from huggingface_hub import HfFolder
 from transformers import pipeline
 
 # Đặt token của bạn vào đây
-hf_token = os.getenv("HF_TOKEN", "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")
+hf_token = os.getenv("HF_TOKEN", "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")
 # Lưu token vào local
 HfFolder.save_token(hf_token)
 
@@ -26,7 +26,7 @@ def _load():
 
         _model = pipeline(
             "text-generation",
-            model="Qwen/Qwen2.5-Coder-7B-Instruct",
+            model="Qwen/Qwen3-1.7B",
             torch_dtype=dtype,
             device_map="auto",
             max_new_tokens=256,
@@ -35,7 +35,7 @@ def _load():
         print("No GPU available, using CPU.")
         _model = pipeline(
             "text-generation",
-            model="Qwen/Qwen2.5-Coder-7B-Instruct",
+            model="Qwen/Qwen3-1.7B",
             device_map="cpu",
             max_new_tokens=256,
         )

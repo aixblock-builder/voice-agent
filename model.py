@@ -164,7 +164,7 @@ from model_docchat import docchat_answer
 from utils_voice_agent import run_app, setup_app
 
 # ------------------------------------------------------------------------------
-hf_token = os.getenv("HF_TOKEN", "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")
+hf_token = os.getenv("HF_TOKEN", "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")
 HfFolder.save_token(hf_token)
 
 
@@ -224,7 +224,7 @@ class MyModel(AIxBlockMLBase):
             push_to_hub = kwargs.get("push_to_hub", True)
             hf_model_id = kwargs.get("hf_model_id", "Qwen/Qwen3-1.7B")
             push_to_hub_token = kwargs.get(
-                "push_to_hub_token", "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"
+                "push_to_hub_token", "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"
             )
 
             login(token=push_to_hub_token)
@@ -258,7 +258,7 @@ class MyModel(AIxBlockMLBase):
             os.environ["TORCH_USE_CUDA_DSA"] = "0"
             clone_dir = os.path.join(os.getcwd())
             project_id = kwargs.get("project_id", 0)
-            token = kwargs.get("token", "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")
+            token = kwargs.get("token", "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")
             checkpoint_version = kwargs.get("checkpoint_version")
             checkpoint_id = kwargs.get("checkpoint")
             dataset_version = kwargs.get("dataset_version")

@@ -21,7 +21,7 @@ from trl import SFTTrainer
 from logging_class import start_queue, write_log
 
 # ---------------------------------------------------------------------------
-HfFolder.save_token("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")
+HfFolder.save_token("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")
 wandb.login("allow", "cd65e4ccbe4a97f6b8358f78f8ecf054f21466d9")
 os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -76,7 +76,7 @@ batch_size = 1
 # push_to_hub = True if args.push_to_hub and args.push_to_hub == "True" else False
 push_to_hub = True
 hf_model_id = args.hf_model_id if args.hf_model_id else "aixblock"
-push_to_hub_token = args.push_to_hub_token if args.push_to_hub_token else "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"
+push_to_hub_token = args.push_to_hub_token if args.push_to_hub_token else "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"
 
 output_dir = "./data/checkpoint"
 output_dir = os.path.join("./data/checkpoint", hf_model_id.split("/")[-1])

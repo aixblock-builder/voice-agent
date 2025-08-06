@@ -1,15 +1,43 @@
 import os
 import subprocess
 import threading
+import shutil
+
 stt_proc = None
 tts_proc = None
 stt_folder = "stt"
 tts_folder = "tts"
 
+
+def ensure_portaudio_installed():
+    if shutil.which("apt-get") is None:
+        print(
+            "apt-get không có sẵn (không phải Debian/Ubuntu?) -> bỏ qua cài đặt portaudio19-dev."
+        )
+        return
+
+    # Dùng sudo nếu không chạy với quyền root
+    sudo = [] if hasattr(os, "geteuid") and os.geteuid() == 0 else ["sudo"]
+
+    env = os.environ.copy()
+    env["DEBIAN_FRONTEND"] = "noninteractive"
+
+    cmds = [
+        sudo + ["apt-get", "update"],
+        sudo + ["apt-get", "install", "-y", "portaudio19-dev"],
+    ]
+
+    for cmd in cmds:
+        print("+", " ".join(cmd))
+        subprocess.run(cmd, check=True, env=env)
+
+
 def setup_app(repo: str, folder: str):
     # 1. Clone repo
     if not os.path.exists(folder):
-        subprocess.run(f"git clone https://github.com/{repo} {folder}", shell=True, check=True)
+        subprocess.run(
+            f"git clone https://github.com/{repo} {folder}", shell=True, check=True
+        )
 
     # 2. Tạo venv nếu chưa có
     venv_path = os.path.join(folder, "venv")
@@ -29,9 +57,10 @@ def setup_app(repo: str, folder: str):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        bufsize=1
+        bufsize=1,
     )
-    
+
+
 def load_model(folder):
     cmd = f"cd {folder} && venv/bin/python load_model.py"
     return subprocess.Popen(
@@ -40,8 +69,9 @@ def load_model(folder):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        bufsize=1
+        bufsize=1,
     )
+
 
 def run_app(folder: str):
     cmd = f"cd {folder} && venv/bin/python app.py"
@@ -51,15 +81,17 @@ def run_app(folder: str):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        bufsize=1
+        bufsize=1,
     )
 
+
 def stream_output(pipe):
-    for line in iter(pipe.readline, ''):
+    for line in iter(pipe.readline, ""):
         line = line.strip()
         if line:
             print(line)
     pipe.close()
+
 
 def run_stt_app_func():
     global stt_proc
@@ -82,6 +114,7 @@ def run_stt_app_func():
         if stt_proc:
             print(f"Process returned with code: {stt_proc.returncode}")
 
+
 def run_tts_app_func():
     global tts_proc
     try:
@@ -103,6 +136,7 @@ def run_tts_app_func():
             tts_proc.wait(timeout=5)
         if tts_proc:
             print(f"Process returned with code: {tts_proc.returncode}")
+
 
 stt_thread = threading.Thread(target=run_stt_app_func, daemon=True)
 tts_thread = threading.Thread(target=run_tts_app_func, daemon=True)

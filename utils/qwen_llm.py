@@ -4,7 +4,7 @@ import gc
 
 
 class QwenLLM:
-    def __init__(self, model_name_or_path="Qwen/Qwen3-4B", device=None, pipe=None, tokenizer=None):
+    def __init__(self, model_name_or_path="Qwen/Qwen3-1.7B", device=None, pipe=None, tokenizer=None):
         # Kiểm tra RAM khả dụng
         print("load_check_point", model_name_or_path)
         if device is None:

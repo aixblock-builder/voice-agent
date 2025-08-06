@@ -16,9 +16,19 @@ import json
 from starlette.websockets import WebSocket
 import subprocess
 import atexit
-from utils_voice_agent import setup_app, tts_thread, stt_thread, tts_proc, stt_proc, stt_folder, tts_folder
+from utils_voice_agent import (
+    setup_app,
+    tts_thread,
+    stt_thread,
+    tts_proc,
+    stt_proc,
+    stt_folder,
+    tts_folder,
+    ensure_portaudio_installed,
+)
 
 subprocess.run("venv/bin/python load_model.py", shell=True)
+ensure_portaudio_installed()
 # Setup STT model
 stt_model_name = os.getenv("STT_MODEL_NAME", "mourinhan8/stt-agent")
 setup_proc = setup_app(stt_model_name, stt_folder)
@@ -29,6 +39,7 @@ tts_model_name = os.getenv("TTS_MODEL_NAME", "mourinhan8/tts-agent")
 setup_proc = setup_app(tts_model_name, tts_folder)
 setup_proc.wait()
 print("tts stt model successfully")
+
 
 # Models for request validation
 class InstallServiceRequest(BaseModel):
@@ -69,12 +80,14 @@ JOB_INTERVAL = int(os.getenv("JOB_INTERVAL", 60))
 model = MyModel()
 chat_history = ChatHistoryManager(persist_directory="./chroma_db_history")
 
+
 class ActionRequest(BaseModel):
     command: str
     params: Dict[str, Any]
     doc_file_urls: Optional[Union[str, List[str]]] = None
     session_id: Optional[str] = None
     use_history: Optional[bool] = True
+
 
 @app.websocket("/ws/stream-token")
 async def websocket_llm(websocket: WebSocket):
@@ -85,10 +98,14 @@ async def websocket_llm(websocket: WebSocket):
             data = await websocket.receive_text()
             print(data)
             message = json.loads(data)
-            response = model.action("predict", **{ "prompt": message["text"], "stream": True, "session_id": "" })
+            response = model.action(
+                "predict",
+                **{"prompt": message["text"], "stream": True, "session_id": ""},
+            )
             stream_id = response["stream_id"]
             print(stream_id)
             queue = streams[stream_id]
+
             async def token_generator():
                 while True:
                     token = await queue.get()
@@ -97,15 +114,19 @@ async def websocket_llm(websocket: WebSocket):
                         break
 
             async for token in token_generator():
-                await websocket.send_json({"client_id": message["client_id"], "token": token})
+                await websocket.send_json(
+                    {"client_id": message["client_id"], "token": token}
+                )
 
     except Exception as e:
         print(f"❌ Error: {str(e)}")
         await websocket.close()
 
+
 @app.get("/demo-sse")
 async def demo_sse():
     return FileResponse("demo-sse.html")
+
 
 # sse stream
 @app.get("/stream/{stream_id}")
@@ -120,12 +141,10 @@ async def stream_output(stream_id: str):
             token = await queue.get()
             if token == "[DONE]":
                 break
-            yield {
-                "event": "new_token",
-                "data": json.dumps({"token": token})
-            }
+            yield {"event": "new_token", "data": json.dumps({"token": token})}
 
     return EventSourceResponse(event_generator())
+
 
 @app.post("/action")
 async def action(request: ActionRequest = Body(...)):
@@ -138,13 +157,17 @@ async def action(request: ActionRequest = Body(...)):
         if not session_id:
             session_result = chat_history.create_new_session()
             session_id = session_result["session_id"]
-            print(f"🆕 Created new session: {session_id} with title: {session_result['title']}")
+            print(
+                f"🆕 Created new session: {session_id} with title: {session_result['title']}"
+            )
 
         # Get conversation history if enabled and for predict command
         conversation_history = []
         if request.use_history and request.command.lower() == "predict":
             conversation_history = chat_history.get_session_history(session_id, limit=5)
-            print(f"📚 Retrieved {len(conversation_history)} history turns for session {session_id}")
+            print(
+                f"📚 Retrieved {len(conversation_history)} history turns for session {session_id}"
+            )
 
         # Normalize URL list
         doc_file_urls = request.doc_file_urls
@@ -163,12 +186,12 @@ async def action(request: ActionRequest = Body(...)):
             parsed_params["session_id"] = session_id
 
         result = model.action(request.command, **parsed_params)
-        
+
         # Save conversation to history if it's a predict command
         if request.command.lower() == "predict" and "result" in result:
             user_prompt = parsed_params.get("prompt", parsed_params.get("text", ""))
             bot_response = ""
-            
+
             # Extract bot response from result
             if isinstance(result.get("result"), list) and len(result["result"]) > 0:
                 first_result = result["result"][0]
@@ -176,7 +199,7 @@ async def action(request: ActionRequest = Body(...)):
                     value = first_result["result"][0].get("value", {})
                     if "text" in value and isinstance(value["text"], list):
                         bot_response = value["text"][0] if value["text"] else ""
-            
+
             print(bot_response)
             # if user_prompt and bot_response:
             #     doc_files_used = parsed_params.get("doc_files", [])
@@ -195,7 +218,10 @@ async def action(request: ActionRequest = Body(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-def fetch_file_paths_from_urls_sync(urls: List[str], save_dir: str = "downloads") -> List[str]:
+
+def fetch_file_paths_from_urls_sync(
+    urls: List[str], save_dir: str = "downloads"
+) -> List[str]:
     file_paths = []
 
     # Tạo thư mục nếu chưa tồn tại
@@ -237,8 +263,8 @@ async def create_new_collection(title: Optional[str] = None):
         session_result = chat_history.create_new_session(title)
         return {
             "id": session_result["session_id"],
-            "title": session_result["title"], 
-            "message": "New collection created"
+            "title": session_result["title"],
+            "message": "New collection created",
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -252,22 +278,20 @@ async def get_all_collections(limit: int = 50):
         # Convert sessions to collections format
         collections = []
         for session in sessions:
-            collections.append({
-                "id": session["session_id"],
-                "title": session.get("title", "Untitled Collection"),
-                "turn_count": session["turn_count"],
-                "first_message": session["first_message"],
-                "last_message": session["last_message"],
-                "created_at": session["created_at"],
-                "updated_at": session["updated_at"],
-                "doc_files_used": list(session["doc_files_used"])
-            })
-        
-        return {
-            "collections": collections,
-            "count": len(collections),
-            "limit": limit
-        }
+            collections.append(
+                {
+                    "id": session["session_id"],
+                    "title": session.get("title", "Untitled Collection"),
+                    "turn_count": session["turn_count"],
+                    "first_message": session["first_message"],
+                    "last_message": session["last_message"],
+                    "created_at": session["created_at"],
+                    "updated_at": session["updated_at"],
+                    "doc_files_used": list(session["doc_files_used"]),
+                }
+            )
+
+        return {"collections": collections, "count": len(collections), "limit": limit}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -277,11 +301,7 @@ async def get_collection_history(collection_id: str, limit: int = 10):
     """Get conversation history for a collection (session)"""
     try:
         history = chat_history.get_session_history(collection_id, limit)
-        return {
-            "id": collection_id,
-            "history": history,
-            "count": len(history)
-        }
+        return {"id": collection_id, "history": history, "count": len(history)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -300,15 +320,15 @@ async def delete_collection(collection_id: str):
 
 
 @app.post("/v2/collections/search")
-async def search_collections(query: str, collection_id: Optional[str] = None, n_results: int = 5):
+async def search_collections(
+    query: str, collection_id: Optional[str] = None, n_results: int = 5
+):
     """Search for similar conversations across collections"""
     try:
-        results = chat_history.search_similar_conversations(query, collection_id, n_results)
-        return {
-            "query": query,
-            "results": results,
-            "count": len(results)
-        }
+        results = chat_history.search_similar_conversations(
+            query, collection_id, n_results
+        )
+        return {"query": query, "results": results, "count": len(results)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -396,12 +416,14 @@ async def handle_sse(request: Request):
             mcp._mcp_server.create_initialization_options(),
         )
 
+
 def cleanup():
     print("Stopping child apps...")
     if stt_proc:
         stt_proc.terminate()
     if tts_proc:
         tts_proc.terminate()
+
 
 atexit.register(cleanup)
 
@@ -420,7 +442,7 @@ if __name__ == "__main__":
         app,
         host="0.0.0.0",
         port=8001,
-        workers=1
+        workers=1,
         # Bạn cũng có thể thêm các cấu hình khác ở đây
         # ssl_keyfile="./key.pem",
         # ssl_certfile="./cert.pem",
