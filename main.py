@@ -16,17 +16,17 @@ import json
 from starlette.websockets import WebSocket
 import subprocess
 import atexit
-from utils_voice_agent import setup_app, tts_thread, stt_thread, tts_proc, stt_proc
+from utils_voice_agent import setup_app, tts_thread, stt_thread, tts_proc, stt_proc, stt_folder, tts_folder
 
 subprocess.run("venv/bin/python load_model.py", shell=True)
 # Setup STT model
 stt_model_name = os.getenv("STT_MODEL_NAME", "mourinhan8/stt-agent")
-setup_proc = setup_app(stt_model_name, "stt")
+setup_proc = setup_app(stt_model_name, stt_folder)
 setup_proc.wait()
 print("init stt model successfully")
 # Setup TTS model
 tts_model_name = os.getenv("TTS_MODEL_NAME", "mourinhan8/tts-agent")
-setup_proc = setup_app(tts_model_name, "tts-voice-agent")
+setup_proc = setup_app(tts_model_name, tts_folder)
 setup_proc.wait()
 print("tts stt model successfully")
 
