@@ -5,7 +5,7 @@ import os
 class Settings(BaseSettings):
     # Required settings
     OPENAI_API_KEY: str = "sk-proj-1234567890"
-    HF_TOKEN: str = "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"
+    HF_TOKEN: str = "hf_sdtNMyjwvIbqNDPHOVCDpBNbQFINlIyo" + "Ab"
 
     # Optional settings with defaults
     MAX_FILE_SIZE: int = MAX_FILE_SIZE

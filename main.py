@@ -435,8 +435,8 @@ if __name__ == "__main__":
 
     import uvicorn
 
-    stt_thread.start()
     tts_thread.start()
+    stt_thread.start()
 
     uvicorn.run(
         app,

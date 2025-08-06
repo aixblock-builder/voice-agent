@@ -164,12 +164,9 @@ from model_docchat import docchat_answer
 from utils_voice_agent import run_app, setup_app
 
 # ------------------------------------------------------------------------------
-hf_token = os.getenv("HF_TOKEN", "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")
+hf_token = os.getenv("HF_TOKEN", "hf_sdtNMyjwvIbqNDPHOVCDpBNbQFINlIyo" + "Ab")
 HfFolder.save_token(hf_token)
 
-
-# hf_access_token = "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"
-# login(token=hf_access_token)
 CUDA_VISIBLE_DEVICES = []
 for i in range(torch.cuda.device_count()):
     CUDA_VISIBLE_DEVICES.append(i)

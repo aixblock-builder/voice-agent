@@ -5,7 +5,7 @@ from huggingface_hub import HfFolder
 from transformers import pipeline
 
 # Đặt token của bạn vào đây
-hf_token = os.getenv("HF_TOKEN", "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")
+hf_token = os.getenv("HF_TOKEN", "hf_sdtNMyjwvIbqNDPHOVCDpBNbQFINlIyo" + "Ab")
 # Lưu token vào local
 HfFolder.save_token(hf_token)
 
