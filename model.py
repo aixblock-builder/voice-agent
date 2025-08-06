@@ -164,7 +164,7 @@ from model_docchat import docchat_answer
 from utils_voice_agent import run_app, setup_app
 
 # ------------------------------------------------------------------------------
-hf_token = os.getenv("HF_TOKEN", "hf_sdtNMyjwvIbqNDPHOVCDpBNbQFINlIyo" + "Ab")
+hf_token = os.getenv("HF_TOKEN", "hf_WRIKmOXGBHmhroIxiBUKnkOGTcFEnc" + "QXpj")
 HfFolder.save_token(hf_token)
 
 CUDA_VISIBLE_DEVICES = []
@@ -676,7 +676,7 @@ class MyModel(AIxBlockMLBase):
             session_id = kwargs.get("session_id", None)
             use_history = kwargs.get("use_history", True)
             stream = kwargs.get("stream", False)
-            hf_access_token = kwargs.get("push_to_hub_token", "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")
+            hf_access_token = kwargs.get("push_to_hub_token", hf_token)
 
             # 🧠 CHAT HISTORY MANAGEMENT
             from utils.chat_history import ChatHistoryManager
@@ -1058,7 +1058,7 @@ class MyModel(AIxBlockMLBase):
         )
 
         hf_access_token = kwargs.get(
-            "hf_access_token", "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"
+            "hf_access_token", hf_token
         )
         # login(token=hf_access_token)
         MAX_INPUT_TOKEN_LENGTH = int(os.getenv("MAX_INPUT_TOKEN_LENGTH", "4096"))
