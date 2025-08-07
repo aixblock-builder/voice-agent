@@ -23,7 +23,11 @@ from fastapi.openapi.utils import get_openapi
 
 manager = ConnectionManager()
 
-app = FastAPI()
+app = FastAPI(
+    title="MyModel API",
+    openapi_url="/swagger.json",
+    docs_url="/swagger",
+)
 
 LLM_WS_URL = "ws://localhost:8001/ws/stream-token"
 # TTS_WS_URL = "wss://localhost:8002/ws/generate-audio"
@@ -97,6 +101,11 @@ services_to_merge = {
     "llm": "http://localhost:8001",
     "tts": "http://localhost:8002",
 }
+services_to_merge = {
+    "llm": "http://localhost:8001",
+    "tts": "http://localhost:8002",
+}
+
 def custom_openapi():
     if app.openapi_schema:
         return app.openapi_schema
@@ -108,52 +117,66 @@ def custom_openapi():
         routes=app.routes,
     )
 
-    if 'components' not in openapi_schema:
-        openapi_schema['components'] = {}
-    if 'schemas' not in openapi_schema['components']:
-        openapi_schema['components']['schemas'] = {}
+    # đảm bảo có sẵn các trường cần thiết
+    openapi_schema.setdefault("components", {}).setdefault("schemas", {})
+    openapi_schema.setdefault("paths", {})
+    openapi_schema.setdefault("tags", [])
 
-    # 4. Lặp qua các dịch vụ con để lấy và hợp nhất schema
+    HTTP_METHODS = {"get", "post", "put", "patch", "delete", "options", "head"}
+
+    def ensure_tag(tag_name: str):
+        """Thêm tag vào openapi_schema['tags'] nếu chưa có."""
+        if not any(t.get("name") == tag_name for t in openapi_schema["tags"]):
+            openapi_schema["tags"].append({"name": tag_name})
+
+    # -----------------------------------------------------------------
+    #  Hợp nhất schema của từng micro-service & gán tag theo prefix
+    # -----------------------------------------------------------------
     for prefix, base_url in services_to_merge.items():
+        ensure_tag(prefix)
         try:
-            # Lấy file openapi.json của dịch vụ con
-            # Lưu ý: dùng httpx.get (đồng bộ) vì hàm này không phải là async
-            response = httpx.get(f"{base_url}/openapi.json")
-            response.raise_for_status()  # Ném lỗi nếu request thất bại
-            service_schema = response.json()
+            resp = httpx.get(f"{base_url}/openapi.json")
+            resp.raise_for_status()
+            service_schema = resp.json()
 
-            # Hợp nhất 'paths'
+            # --- paths ---
             for path, path_item in service_schema.get("paths", {}).items():
-                # Thêm prefix vào đường dẫn
-                openapi_schema["paths"][f"/{prefix}{path}"] = path_item
+                new_path = f"/{prefix}{path}"
+                openapi_schema["paths"][new_path] = path_item
 
-            # Hợp nhất 'components' (ví dụ: các model Pydantic)
-            # Cẩn thận: có thể bị trùng tên schema giữa các dịch vụ
-            service_components = service_schema.get("components", {}).get("schemas", {})
-            openapi_schema["components"]["schemas"].update(service_components)
+                # gắn tag cho từng HTTP method
+                for method, op in path_item.items():
+                    if method in HTTP_METHODS:
+                        op["tags"] = [prefix] + [
+                            t for t in op.get("tags", []) if t != prefix
+                        ]
+
+            # --- components.schemas ---
+            openapi_schema["components"]["schemas"].update(
+                service_schema.get("components", {}).get("schemas", {})
+            )
 
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
-            # Ghi log lỗi nếu không thể kết nối đến dịch vụ con
-            print(f"Could not fetch OpenAPI schema for '{prefix}': {e}")
-            # Thêm một path giả để báo hiệu dịch vụ đang lỗi trên Swagger
+            # fallback nếu service không truy cập được
+            print(f"[WARN] Cannot fetch schema of '{prefix}': {e}")
             openapi_schema["paths"][f"/{prefix}/service_unavailable"] = {
                 "get": {
                     "summary": f"Service '{prefix}' is unavailable",
                     "description": f"Could not connect to {base_url} to fetch API details.",
-                    "responses": {
-                        "503": {"description": "Service Unavailable"}
-                    }
+                    "tags": [prefix],
+                    "responses": {"503": {"description": "Service Unavailable"}},
                 }
             }
 
     app.openapi_schema = openapi_schema
     return app.openapi_schema
 
-@app.get("/")
+
+@app.get("/", tags=["stt"])
 async def demo_interface():
     return FileResponse("index.html")
 
-@app.get("/ui-test")
+@app.get("/ui-test", tags=["stt"])
 async def demo_interface_test():
     return FileResponse("index_test.html")
 

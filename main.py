@@ -31,13 +31,11 @@ subprocess.run("venv/bin/python load_model.py", shell=True)
 ensure_portaudio_installed()
 # Setup STT model
 stt_model_name = os.getenv("STT_MODEL_NAME", "mourinhan8/stt-agent")
-setup_proc = setup_app(stt_model_name, stt_folder)
-setup_proc.wait()
+setup_app(stt_model_name, stt_folder)
 print("init stt model successfully")
 # Setup TTS model
 tts_model_name = os.getenv("TTS_MODEL_NAME", "mourinhan8/tts-agent")
-setup_proc = setup_app(tts_model_name, tts_folder)
-setup_proc.wait()
+setup_app(tts_model_name, tts_folder)
 print("tts stt model successfully")
 
 

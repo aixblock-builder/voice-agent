@@ -2,6 +2,7 @@ import os
 import subprocess
 import threading
 import shutil
+import queue
 
 stt_proc = None
 tts_proc = None
@@ -45,32 +46,36 @@ def setup_app(repo: str, folder: str):
         subprocess.run(f"python3 -m venv venv", shell=True, cwd=folder, check=True)
 
     # 3. Cài requirements
-    pip_exec = os.path.join(venv_path, "bin", "pip")
     requirements_file = os.path.join(folder, "requirements.txt")
     if os.path.exists(requirements_file):
-        subprocess.run([pip_exec, "install", "-r", requirements_file], check=True)
+        subprocess.run(f"venv/bin/pip install -r requirements.txt", shell=True, cwd=folder, check=True)
 
-    cmd = f"cd {folder} && venv/bin/python load_model.py"
-    return subprocess.Popen(
-        cmd,
-        shell=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,
-    )
+    load_model(folder)
 
 
 def load_model(folder):
-    cmd = f"cd {folder} && venv/bin/python load_model.py"
-    return subprocess.Popen(
-        cmd,
-        shell=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,
-    )
+    load_model_file = os.path.join(folder, "load_model.py")
+    if os.path.exists(load_model_file):
+        cmd = f"cd {folder} && venv/bin/python load_model.py"
+        load_model_process = subprocess.Popen(
+            cmd,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        for line in iter(load_model_process.stdout.readline, ''):
+            print(line.strip())
+
+        for line in iter(load_model_process.stderr.readline, ''):
+            print(line.strip())
+
+        load_model_process.stdout.close()
+        load_model_process.stderr.close()
+        load_model_process.wait()
+        print(f"Hoàn thành load model từ {load_model_file}")
+
 
 
 def run_app(folder: str):
@@ -85,23 +90,31 @@ def run_app(folder: str):
     )
 
 
-def stream_output(pipe):
-    for line in iter(pipe.readline, ""):
-        line = line.strip()
-        if line:
-            print(line)
-    pipe.close()
+def stream_output(pipe, q):
+    try:
+        for line in iter(pipe.readline, ''):
+            q.put(line)
+    finally:
+        pipe.close()
 
 
 def run_stt_app_func():
     global stt_proc
+    q = queue.Queue()
     try:
         stt_proc = run_app(stt_folder)
         # Tạo thread để đọc stdout và stderr song song
-        stdout_thread = threading.Thread(target=stream_output, args=(stt_proc.stdout,))
-        stderr_thread = threading.Thread(target=stream_output, args=(stt_proc.stderr,))
+        stdout_thread = threading.Thread(target=stream_output, args=(stt_proc.stdout, q))
+        stderr_thread = threading.Thread(target=stream_output, args=(stt_proc.stderr, q))
         stdout_thread.start()
         stderr_thread.start()
+        while True:
+            try:
+                line = q.get(timeout=0.1)
+                print(line, end='')
+            except queue.Empty:
+                if stt_proc.poll() is not None and q.empty():
+                    break
         ret = stt_proc.wait()
         stdout_thread.join()
         stderr_thread.join()
@@ -117,13 +130,21 @@ def run_stt_app_func():
 
 def run_tts_app_func():
     global tts_proc
+    q = queue.Queue()
     try:
         tts_proc = run_app(tts_folder)
         # Tạo thread để đọc stdout và stderr song song
-        stdout_thread = threading.Thread(target=stream_output, args=(tts_proc.stdout,))
-        stderr_thread = threading.Thread(target=stream_output, args=(tts_proc.stderr,))
+        stdout_thread = threading.Thread(target=stream_output, args=(tts_proc.stdout, q))
+        stderr_thread = threading.Thread(target=stream_output, args=(tts_proc.stderr, q))
         stdout_thread.start()
         stderr_thread.start()
+        while True:
+            try:
+                line = q.get(timeout=0.1)
+                print(line, end='')
+            except queue.Empty:
+                if tts_proc.poll() is not None and q.empty():
+                    break
         ret = tts_proc.wait()
         stdout_thread.join()
         stderr_thread.join()
