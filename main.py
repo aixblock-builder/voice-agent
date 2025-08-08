@@ -17,26 +17,14 @@ from starlette.websockets import WebSocket
 import subprocess
 import atexit
 from utils_voice_agent import (
-    setup_app,
     tts_thread,
     stt_thread,
     tts_proc,
     stt_proc,
-    stt_folder,
-    tts_folder,
     ensure_portaudio_installed,
 )
 
 subprocess.run("venv/bin/python load_model.py", shell=True)
-ensure_portaudio_installed()
-# Setup STT model
-stt_model_name = os.getenv("STT_MODEL_NAME", "mourinhan8/stt-agent")
-setup_app(stt_model_name, stt_folder)
-print("init stt model successfully")
-# Setup TTS model
-tts_model_name = os.getenv("TTS_MODEL_NAME", "mourinhan8/tts-agent")
-setup_app(tts_model_name, tts_folder)
-print("tts stt model successfully")
 
 
 # Models for request validation
@@ -58,7 +46,8 @@ class DashboardRequest(BaseModel):
     directory: str
 
 
-app = FastAPI(title="MyModel API")
+
+app = FastAPI()
 
 # CORS configuration
 app.add_middleware(
@@ -120,11 +109,15 @@ async def websocket_llm(websocket: WebSocket):
         print(f"❌ Error: {str(e)}")
         await websocket.close()
 
-
 @app.get("/demo-sse")
 async def demo_sse():
     return FileResponse("demo-sse.html")
 
+@app.get("/init-voice-agent")
+async def run_voice_agent():
+    ensure_portaudio_installed()
+    tts_thread.start()
+    return { "message": "service is initializing" }
 
 # sse stream
 @app.get("/stream/{stream_id}")
@@ -433,15 +426,15 @@ if __name__ == "__main__":
 
     import uvicorn
 
-    tts_thread.start()
+
     stt_thread.start()
+
 
     uvicorn.run(
         app,
         host="0.0.0.0",
         port=8001,
-        workers=1,
         # Bạn cũng có thể thêm các cấu hình khác ở đây
-        # ssl_keyfile="./key.pem",
-        # ssl_certfile="./cert.pem",
+        # ssl_keyfile="ssl/key.pem",
+        # ssl_certfile="ssl/cert.pem",
     )

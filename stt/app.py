@@ -101,15 +101,8 @@ services_to_merge = {
     "llm": "http://localhost:8001",
     "tts": "http://localhost:8002",
 }
-services_to_merge = {
-    "llm": "http://localhost:8001",
-    "tts": "http://localhost:8002",
-}
 
 def custom_openapi():
-    if app.openapi_schema:
-        return app.openapi_schema
-
     openapi_schema = get_openapi(
         title=app.title,
         version=app.version,
@@ -191,7 +184,7 @@ async def websocket_endpoint_test(websocket: WebSocket):
                 data = await websocket.receive_json()
                 text = data.get("text")
                 print(f"Received text: {text}")
-                await llm_client.request_response(client_id, text)
+                asyncio.create_task(llm_client.request_response(client_id, text))
             except Exception as e:
                 raise e
     except WebSocketDisconnect:
@@ -263,9 +256,9 @@ async def websocket_endpoint_v2(websocket: WebSocket):
                         if transcript:
                             await manager.send_json_to_client({ 
                                 "type": "transcript", 
-                                "transcript": transcript 
+                                "transcript": transcript
                             }, client_id)
-                            await llm_client.request_response(client_id, transcript)
+                            asyncio.create_task(llm_client.request_response(client_id, transcript))
 
                         is_recording = False
                         recording_buffer.clear()
@@ -273,9 +266,11 @@ async def websocket_endpoint_v2(websocket: WebSocket):
                 
                 elif speech_probability > VAD_SPEECH_THRESHOLD:
                     print("[*] Bắt đầu ghi âm...")
+                    manager.interrupt_tts_if_any(client_id)
                     is_recording = True
                     recording_buffer.extend(frames)
                     silence_counter = 0
+
             except Exception as e:
                 raise e
     except WebSocketDisconnect:
@@ -399,10 +394,8 @@ if __name__ == "__main__":
             except OSError:
                 continue
         raise RuntimeError("No available ports found")
-    
     available_port = find_available_port()
     print(f"Starting server on port {available_port}")
-
     ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
     ssl_context.load_cert_chain(certfile="ssl/cert.pem", keyfile="ssl/key.pem")
 

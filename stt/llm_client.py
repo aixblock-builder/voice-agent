@@ -125,7 +125,8 @@ async def handle_llm_response(client_id: str, response_text: str, manager: Conne
     Nó sẽ kích hoạt bước tiếp theo: yêu cầu TTS tạo giọng nói.
     """
     print(f"Gateway: Nhận text từ LLM cho client '{client_id}', gửi qua TTS...")
-    await get_audio_from_tts_service(client_id, response_text, manager)
+    task = asyncio.create_task(get_audio_from_tts_service(client_id, response_text, manager))
+    manager.set_tts_task(client_id, task)
 
 async def get_audio_from_tts_service(client_id: str, text: str, manager: ConnectionManager):
     """
@@ -156,6 +157,10 @@ async def get_audio_from_tts_service(client_id: str, text: str, manager: Connect
                             print(f"Gateway: Lỗi khi parse JSON từ TTS: {line}")
                             # Gửi tin nhắn lỗi về cho client
                             await manager.send_json_to_client({"error": "Invalid JSON from TTS."}, client_id)
+    
+    except asyncio.CancelledError:
+        print(f"[TTS] Stream bị hủy giữa chừng cho client {client_id}")
+        raise
                             
     except httpx.RequestError as e:
         print(f"Gateway: Lỗi khi gọi đến TTS service: {e}")

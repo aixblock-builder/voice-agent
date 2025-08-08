@@ -99,6 +99,7 @@ def stream_output(pipe, q):
 
 
 def run_stt_app_func():
+
     global stt_proc
     q = queue.Queue()
     try:
@@ -129,6 +130,8 @@ def run_stt_app_func():
 
 
 def run_tts_app_func():
+    tts_model_name = os.getenv("TTS_MODEL_NAME", "mourinhan8/tts-agent")
+    setup_app(tts_model_name, tts_folder)
     global tts_proc
     q = queue.Queue()
     try:
