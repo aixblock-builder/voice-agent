@@ -32,6 +32,7 @@ class LLMClient:
         self.response_buffers: Dict[str, str] = {}
         # Cấu hình SSL (chỉ cho môi trường test)
         self.is_running = False
+        self.pending_futures: Dict[str, asyncio.Future] = {}
 
     async def connect_and_listen(self):
         """
@@ -73,24 +74,37 @@ class LLMClient:
             if not client_id or token is None:
                 return
 
-            # Khởi tạo buffer nếu đây là token đầu tiên của client_id này
-            if client_id not in self.response_buffers:
-                self.response_buffers[client_id] = ""
+            # Nếu không ai chờ kết quả của client_id này → bỏ qua
+            if client_id not in self.pending_futures:
+                return
+
+            buf = self.response_buffers.setdefault(client_id, "")
 
             # Nếu là token kết thúc
             if token == "[DONE]":
-                full_response = self.response_buffers.pop(client_id, "")
+                full = self.response_buffers.pop(client_id, "")
                 print(f"LLMClient: Hoàn tất phản hồi cho client '{client_id}'.")
-                # Gọi hàm callback đã đăng ký để xử lý bước tiếp theo
-                await self.on_response_callback(client_id, full_response, self.manager)
+                # ► Trả kết quả cho pipeline nếu có Future đang chờ
+                fut = self.pending_futures.get(client_id)
+                if fut and not fut.done():
+                    fut.set_result(full)
+                else:
+                    # fallback: gọi callback cũ (nếu bạn vẫn muốn hỗ trợ đường cũ)
+                    await self.on_response_callback(client_id, full, self.manager)
             # Nếu là token bình thường
             else:
-                self.response_buffers[client_id] += token
+                self.response_buffers[client_id] = buf + token
 
         except json.JSONDecodeError:
             print(f"LLMClient: Lỗi - Nhận được tin nhắn không phải JSON: {message}")
         except Exception as e:
             print(f"LLMClient: Lỗi khi xử lý tin nhắn: {e}")
+
+    def cleanup_fn(self, client_id):
+        fut = self.pending_futures.pop(client_id, None)
+        if fut and not fut.done():
+            fut.cancel()
+        self.response_buffers.pop(client_id, None)
 
     async def request_response(self, client_id: str, text: str):
         """
@@ -99,15 +113,21 @@ class LLMClient:
         if not self.websocket:
             print("LLMClient: Lỗi - Không thể gửi yêu cầu, chưa kết nối tới LLM.")
             return
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        self.pending_futures[client_id] = fut
+        payload = {
+            "client_id": client_id,
+            "text": text
+        }
+        await self.websocket.send(json.dumps(payload))
+        print(f"LLMClient: Đã gửi yêu cầu cho client '{client_id}'.")
         try:
-            payload = {
-                "client_id": client_id,
-                "text": text
-            }
-            await self.websocket.send(json.dumps(payload))
-            print(f"LLMClient: Đã gửi yêu cầu cho client '{client_id}'.")
+            return await fut
         except Exception as e:
             print(f"LLMClient: Lỗi khi gửi yêu cầu: {e}")
+        finally:
+            self.pending_futures.pop(client_id, None)
 
     async def close(self):
         """
@@ -118,6 +138,20 @@ class LLMClient:
         if self.websocket:
             await self.websocket.close(code=1000, reason='Client shutting down')
             print("LLMClient: Kết nối WebSocket đã được đóng.")
+
+async def llm_tts_pipeline(client_id, prompt, llm_client, manager):
+    try:
+        response_text = await llm_client.request_response(client_id, prompt)
+        if not response_text:
+            await manager.send_json_to_client({"error": "LLM returned empty."}, client_id)
+            return
+        await get_audio_from_tts_service(client_id, response_text, manager)
+    except asyncio.CancelledError:
+            # Task bị huỷ khi user gửi prompt mới → im lặng thoát
+            print(f"[PIPE] Pipeline client {client_id} bị huỷ (prompt mới).")
+    except Exception as e:
+        print(f"[PIPE] Lỗi pipeline: {e}")
+        await manager.send_json_to_client({"error": "Internal pipeline error"}, client_id)
 
 async def handle_llm_response(client_id: str, response_text: str, manager: ConnectionManager):
     """

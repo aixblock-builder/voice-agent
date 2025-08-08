@@ -15,7 +15,7 @@ from transformers import (
 )
 from vad_utils import process_frame, SAMPLE_RATE, FRAME_SIZE
 import uuid
-from llm_client import LLMClient, handle_llm_response
+from llm_client import LLMClient, handle_llm_response, llm_tts_pipeline
 # from tts_client import TTSClient
 import httpx
 from fastapi_proxy_lib.fastapi.app import reverse_http_app
@@ -182,9 +182,20 @@ async def websocket_endpoint_test(websocket: WebSocket):
         while True:
             try:
                 data = await websocket.receive_json()
-                text = data.get("text")
+                text = data.get("text", "").strip()
+                if not text:
+                    continue
                 print(f"Received text: {text}")
-                asyncio.create_task(llm_client.request_response(client_id, text))
+                # 🔥 HUỶ pipeline cũ (nếu đang chạy)
+                if manager.cancel_pipeline(client_id, llm_client.cleanup_fn):
+                    # Thông báo client dừng audio nếu cần
+                    await manager.send_json_to_client({"type": "control", "event": "interrupt"}, client_id)
+
+                # 🔥 TẠO pipeline mới
+                task = asyncio.create_task(
+                    llm_tts_pipeline(client_id, text, llm_client, manager)
+                )
+                manager.set_pipeline_task(client_id, task, llm_client.cleanup_fn)
             except Exception as e:
                 raise e
     except WebSocketDisconnect:
@@ -254,11 +265,19 @@ async def websocket_endpoint_v2(websocket: WebSocket):
                         transcript = await audio_processor.process_audio(audio_bytes)
                         print(transcript)
                         if transcript:
+                            if manager.cancel_pipeline(client_id, llm_client.cleanup_fn):
+                            # Thông báo client dừng audio nếu cần
+                                await manager.send_json_to_client({"type": "control", "event": "interrupt"}, client_id)
+                            
                             await manager.send_json_to_client({ 
                                 "type": "transcript", 
                                 "transcript": transcript
                             }, client_id)
-                            asyncio.create_task(llm_client.request_response(client_id, transcript))
+                            # 🔥 TẠO pipeline mới
+                            task = asyncio.create_task(
+                                llm_tts_pipeline(client_id, transcript, llm_client, manager)
+                            )
+                            manager.set_pipeline_task(client_id, task, llm_client.cleanup_fn)
 
                         is_recording = False
                         recording_buffer.clear()
@@ -266,7 +285,6 @@ async def websocket_endpoint_v2(websocket: WebSocket):
                 
                 elif speech_probability > VAD_SPEECH_THRESHOLD:
                     print("[*] Bắt đầu ghi âm...")
-                    manager.interrupt_tts_if_any(client_id)
                     is_recording = True
                     recording_buffer.extend(frames)
                     silence_counter = 0

@@ -8,7 +8,7 @@ class ConnectionManager:
     def __init__(self):
         self.active_connections: Dict[str, WebSocket] = {}
         self.tts_tasks: Dict[str, asyncio.Task] = {}
-        self.tts_active_flags: Dict[str, bool] = {}
+        self.pipeline_tasks: dict[str, asyncio.Task] = {}
 
     async def connect(self, websocket: WebSocket) -> str:
         await websocket.accept()
@@ -42,24 +42,19 @@ class ConnectionManager:
             self.tts_tasks[client_id].cancel()
         self.tts_tasks[client_id] = task
 
-    def interrupt_tts_if_any(self, client_id: str) -> bool:
-        """
-        Ngắt nếu đang phát TTS hoặc vừa mới phát xong (nhưng client có thể chưa phát hết).
-        """
-        has_interrupted = False
+    def set_pipeline_task(self, client_id: str, task: asyncio.Task, cleanup_fn):
+        # Huỷ pipeline cũ nếu còn chạy
+        old = self.pipeline_tasks.get(client_id)
+        if old and not old.done():
+            old.cancel()
+            cleanup_fn(client_id)
+        self.pipeline_tasks[client_id] = task
 
-        # Gửi interrupt nếu flag đang phát TTS là True
-        if self.tts_active_flags.get(client_id, False):
-            print(f"[TTS] Ngắt TTS đang hoạt động cho client {client_id}")
-            self.tts_active_flags[client_id] = False  # reset cờ
-            has_interrupted = True
+    def cancel_pipeline(self, client_id: str, cleanup_fn):
+        task = self.pipeline_tasks.get(client_id)
+        if task and not task.done():
+            task.cancel()
+            cleanup_fn(client_id)
+            return True
+        return False
 
-        # Nếu task còn chạy thì cancel luôn
-        if client_id in self.tts_tasks:
-            task = self.tts_tasks[client_id]
-            if not task.done():
-                print(f"[TTS] Cancel task TTS đang chạy cho client {client_id}")
-                task.cancel()
-                has_interrupted = True
-
-        return has_interrupted
