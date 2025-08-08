@@ -136,7 +136,31 @@ async def stream_output(stream_id: str):
 
     return EventSourceResponse(event_generator())
 
+@app.post("/mcp/register")
+async def register_mcp_server(
+    name: str = Body(...), 
+    endpoint: str = Body(...), 
+    auth_token: str = Body(None),
+    tools: List[Dict[str, Any]] = Body(None),
+    memoryConnection: Dict[str, Any] = Body(None),
+    storageConnection: Dict[str, Any] = Body(None)
+):
+    """Register a remote MCP server"""
+    try:
+        result = model.action("mcp_register_payload", name=name, endpoint=endpoint, auth_token=auth_token, tools=tools, memoryConnection=memoryConnection, storageConnection=storageConnection)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/mcp/tools")
+async def list_mcp_tools():
+    """List all available MCP tools"""
+    try:
+        result = model.action("mcp_list_tools")
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+        
 @app.post("/action")
 async def action(request: ActionRequest = Body(...)):
     try:
