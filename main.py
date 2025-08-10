@@ -1,5 +1,6 @@
+import asyncio
 import os
-from typing import Any, Dict, Optional, List, Union
+from typing import Any, Dict, Optional, List, Union, AsyncIterator
 import requests
 from pathlib import Path
 
@@ -9,20 +10,23 @@ from fastapi.responses import FileResponse, RedirectResponse, JSONResponse
 from mcp.server.sse import SseServerTransport
 from pydantic import BaseModel
 from starlette.routing import Mount
-from sse_starlette.sse import EventSourceResponse
-from model import MyModel, mcp, streams
+from model import MyModel, mcp
 from utils.chat_history import ChatHistoryManager
 import json
 from starlette.websockets import WebSocket
 import subprocess
 import atexit
 from utils_voice_agent import (
+    setup_app,
     tts_thread,
     stt_thread,
+    tts_folder,
     tts_proc,
     stt_proc,
     ensure_portaudio_installed,
 )
+from fastapi_proxy_lib.fastapi.app import reverse_http_app
+from starlette.websockets import WebSocket
 
 subprocess.run("venv/bin/python load_model.py", shell=True)
 
@@ -44,7 +48,6 @@ class StopServiceRequest(BaseModel):
 
 class DashboardRequest(BaseModel):
     directory: str
-
 
 
 app = FastAPI()
@@ -87,70 +90,65 @@ async def websocket_llm(websocket: WebSocket):
             message = json.loads(data)
             response = model.action(
                 "predict",
-                **{"prompt": message["text"], "stream": True, "session_id": ""},
+                **{"prompt": message["text"], "session_id": ""},
             )
-            stream_id = response["stream_id"]
-            print(stream_id)
-            queue = streams[stream_id]
+            print(response["result"][0]["result"][0]["value"])
 
-            async def token_generator():
-                while True:
-                    token = await queue.get()
-                    yield token
-                    if token == "[DONE]":
-                        break
-
-            async for token in token_generator():
-                await websocket.send_json(
-                    {"client_id": message["client_id"], "token": token}
-                )
+            await websocket.send_json(
+                {
+                    "client_id": message["client_id"],
+                    "response": response["result"][0]["result"][0]["value"],
+                }
+            )
+    except WebSocketDisconnect:
+        print("client disconnected")
 
     except Exception as e:
         print(f"❌ Error: {str(e)}")
         await websocket.close()
 
-@app.get("/demo-sse")
-async def demo_sse():
-    return FileResponse("demo-sse.html")
+@app.post("/init-stt")
+async def init_stt(model: str = Body(default='mourinhan8/stt', embed=True)):
+    asyncio.create_task(setup_app(model, tts_folder))
+    return {"message": "service is initializing"}
 
-@app.get("/init-voice-agent")
-async def run_voice_agent():
+@app.post("/init-tts")
+async def init_tts(model: str = Body(default='mourinhan8/tts', embed=True)):
     ensure_portaudio_installed()
+    asyncio.create_task(setup_app(model, tts_folder))
+    return {"message": "service is initializing"}
+
+@app.get("/start-voice-agent")
+async def start_voice_agent():
+    stt_thread.start()
     tts_thread.start()
-    return { "message": "service is initializing" }
+    return {"message": "starting services", "port": 1005 }
 
-# sse stream
-@app.get("/stream/{stream_id}")
-async def stream_output(stream_id: str):
-    if stream_id not in streams:
-        return JSONResponse({"error": "Invalid stream_id"}, status_code=404)
-
-    queue = streams[stream_id]
-
-    async def event_generator():
-        while True:
-            token = await queue.get()
-            if token == "[DONE]":
-                break
-            yield {"event": "new_token", "data": json.dumps({"token": token})}
-
-    return EventSourceResponse(event_generator())
 
 @app.post("/mcp/register")
 async def register_mcp_server(
-    name: str = Body(...), 
-    endpoint: str = Body(...), 
+    name: str = Body(...),
+    endpoint: str = Body(...),
     auth_token: str = Body(None),
     tools: List[Dict[str, Any]] = Body(None),
     memoryConnection: Dict[str, Any] = Body(None),
-    storageConnection: Dict[str, Any] = Body(None)
+    storageConnection: Dict[str, Any] = Body(None),
 ):
     """Register a remote MCP server"""
     try:
-        result = model.action("mcp_register_payload", name=name, endpoint=endpoint, auth_token=auth_token, tools=tools, memoryConnection=memoryConnection, storageConnection=storageConnection)
+        result = model.action(
+            "mcp_register_payload",
+            name=name,
+            endpoint=endpoint,
+            auth_token=auth_token,
+            tools=tools,
+            memoryConnection=memoryConnection,
+            storageConnection=storageConnection,
+        )
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/mcp/tools")
 async def list_mcp_tools():
@@ -160,7 +158,8 @@ async def list_mcp_tools():
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-        
+
+
 @app.post("/action")
 async def action(request: ActionRequest = Body(...)):
     try:
@@ -450,14 +449,22 @@ if __name__ == "__main__":
 
     import uvicorn
 
+    def find_available_port(start_port=3000, max_port=5000):
+        for port in range(start_port, max_port + 1):
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.bind(("0.0.0.0", port))
+                    return port
+            except OSError:
+                continue
+        raise RuntimeError("No available ports found")
 
-    stt_thread.start()
-
+    available_port = find_available_port()
 
     uvicorn.run(
         app,
         host="0.0.0.0",
-        port=8001,
+        port=available_port,
         # Bạn cũng có thể thêm các cấu hình khác ở đây
         # ssl_keyfile="ssl/key.pem",
         # ssl_certfile="ssl/cert.pem",

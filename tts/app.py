@@ -259,7 +259,7 @@ if __name__ == "__main__":
     uvicorn.run(
         app,
         host="0.0.0.0",
-        port=8002,
+        port=1006,
         # ssl_keyfile="ssl/key.pem",
         # ssl_certfile="ssl/cert.pem",
     )

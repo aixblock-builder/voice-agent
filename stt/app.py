@@ -29,7 +29,7 @@ app = FastAPI(
     docs_url="/swagger",
 )
 
-LLM_WS_URL = "ws://localhost:8001/ws/stream-token"
+LLM_WS_URL = "wss://localhost:3000/ws/stream-token"
 # TTS_WS_URL = "wss://localhost:8002/ws/generate-audio"
 
 # Khởi tạo cả 2 client với các hàm callback tương ứng
@@ -387,7 +387,7 @@ async def websocket_endpoint(websocket: WebSocket):
         print("WebSocket connection closed.")
 
 # Reverse proxy các route
-llm_app = reverse_http_app(base_url="http://localhost:8001/")
+llm_app = reverse_http_app(base_url="http://localhost:3000/")
 
 app.mount("/llm", llm_app)
 
@@ -420,7 +420,7 @@ if __name__ == "__main__":
     uvicorn.run(
         app,
         host="0.0.0.0",
-        port=available_port,
+        port=1005,
         ssl_keyfile="ssl/key.pem",
         ssl_certfile="ssl/cert.pem",
     )

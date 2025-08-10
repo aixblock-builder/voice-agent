@@ -28,11 +28,10 @@ class LLMClient:
         self.on_response_callback = on_response_callback
         self.manager = manager
         self.websocket: Optional[WebSocketClientProtocol] = None
-        # Dùng để ghép các token cho mỗi yêu cầu
-        self.response_buffers: Dict[str, str] = {}
         # Cấu hình SSL (chỉ cho môi trường test)
         self.is_running = False
         self.pending_futures: Dict[str, asyncio.Future] = {}
+        self.ssl_context = ssl._create_unverified_context()
 
     async def connect_and_listen(self):
         """
@@ -42,7 +41,7 @@ class LLMClient:
         while self.is_running:
             try:
                 print("LLMClient: Đang kết nối tới LLM...")
-                async with websockets.connect(self.uri) as ws:
+                async with websockets.connect(self.uri, ssl=self.ssl_context) as ws:
                     self.websocket = ws
                     print("✅ LLMClient: Kết nối thành công tới LLM.")
                     
@@ -69,31 +68,19 @@ class LLMClient:
             # Giả định LLM trả về JSON chứa client_id và token
             data = json.loads(message)
             client_id = data.get("client_id")
-            token = data.get("token")
-
-            if not client_id or token is None:
+            text_response = data.get("response")['text'][0]
+            if not client_id or text_response is None:
                 return
 
             # Nếu không ai chờ kết quả của client_id này → bỏ qua
             if client_id not in self.pending_futures:
                 return
-
-            buf = self.response_buffers.setdefault(client_id, "")
-
-            # Nếu là token kết thúc
-            if token == "[DONE]":
-                full = self.response_buffers.pop(client_id, "")
-                print(f"LLMClient: Hoàn tất phản hồi cho client '{client_id}'.")
-                # ► Trả kết quả cho pipeline nếu có Future đang chờ
-                fut = self.pending_futures.get(client_id)
-                if fut and not fut.done():
-                    fut.set_result(full)
-                else:
-                    # fallback: gọi callback cũ (nếu bạn vẫn muốn hỗ trợ đường cũ)
-                    await self.on_response_callback(client_id, full, self.manager)
-            # Nếu là token bình thường
+            fut = self.pending_futures.get(client_id)
+            if fut and not fut.done():
+                fut.set_result(text_response)
             else:
-                self.response_buffers[client_id] = buf + token
+                # fallback: gọi callback cũ (nếu bạn vẫn muốn hỗ trợ đường cũ)
+                await self.on_response_callback(client_id, text_response, self.manager)
 
         except json.JSONDecodeError:
             print(f"LLMClient: Lỗi - Nhận được tin nhắn không phải JSON: {message}")
