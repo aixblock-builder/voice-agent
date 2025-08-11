@@ -1,6 +1,7 @@
 # voice_agent_manager.py
 import asyncio, time, contextlib
 from typing import Optional, Callable
+from urllib.parse import urlparse
 from uuid import uuid4
 import httpx
 import psutil
@@ -51,16 +52,20 @@ async def service_status(service_id: str) -> dict:
     if not e:
         return {"error": "service not found"}
     # cập nhật state nếu server_task đã kết thúc
-    if e.server_task and e.server_task.done() and e.state in ("starting",):
-        exc = e.server_task.exception()
-        e.state = "failed" if exc else "stopped"
-        e.error = str(exc) if exc else None
-    return {
-        "id": e.id, "name": e.name, "model": e.model,
-        "state": e.state, "error": e.error,
-        "started_at": e.started_at, "ready_at": e.ready_at,
-        "health_url": e.health_url,
-    }
+    try:
+        if e.server_task and e.server_task.done() and e.state in ("starting",):
+            exc = e.server_task.exception()
+            e.state = "failed" if exc else "stopped"
+            e.error = str(exc) if exc else None
+        return {
+            "id": e.id, "name": e.name, "model": e.model,
+            "state": e.state, "error": e.error,
+            "started_at": e.started_at, "ready_at": e.ready_at,
+            "health_url": e.health_url,
+        }
+    except Exception as e:
+        print(f"[manager] service_status error: {e}")
+        return {"error": f"failed to get service status: {str(e)}"}
 
 async def list_services() -> dict:
     return {sid: await service_status(sid) for sid in list(services.keys())}
@@ -101,17 +106,19 @@ async def cancel_service(service_id: str, *, kill_by_port: Optional[int] = None)
 async def _monitor_health(service_id: str, timeout_s: float) -> None:
     e = services[service_id]
     deadline = time.time() + timeout_s
+
+    # tắt verify nếu là https
+    verify_flag = False if urlparse(e.health_url).scheme == "https" else True
+
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(verify=verify_flag) as client:
             while True:
-                # server đã kết thúc?
                 if e.server_task and e.server_task.done():
                     exc = e.server_task.exception()
                     e.state = "failed" if exc else "stopped"
                     e.error = str(exc) if exc else None
                     return
 
-                # ping /health
                 try:
                     r = await client.get(e.health_url, timeout=2.0)
                     if r.status_code == 200:

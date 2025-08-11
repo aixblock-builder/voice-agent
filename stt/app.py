@@ -173,6 +173,10 @@ async def demo_interface():
 async def demo_interface_test():
     return FileResponse("index_test.html")
 
+@app.get("/health-check", tags=["stt"])
+async def health():
+    return {"status": "ok", "message": "STT service is running"}
+
 audio_processor = AudioProcessor(pipe=asr_pipe)
 
 @app.websocket("/ws/audio_v2_test")

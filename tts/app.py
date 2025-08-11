@@ -81,6 +81,10 @@ if USE_CACHE:
 async def index():
     return FileResponse("index.html")
 
+@app.get("/health-check")
+async def health():
+    return {"status": "ok", "message": "TTS service is running"}
+
 @app.get('/tts_stream')
 async def tts_stream(request: Request, text: str = Query(), speaker_wav: str = Query(), language: str = Query()):
     # Validate local model source.

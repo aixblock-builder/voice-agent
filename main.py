@@ -120,14 +120,14 @@ async def start_voice_agent(
     stt_id = await start_service(
         name="stt",
         model=stt_model,
-        health_url=None,
+        health_url="https://localhost:1005/health-check",
         run_fn_blocking=run_stt_app_func,
         stop_fn=stop_stt_app,
     )
     tts_id = await start_service(
         name="tts",
         model=tts_model,
-        health_url=None,
+        health_url="http://localhost:1006/health-check",
         run_fn_blocking=run_tts_app_func,
         stop_fn=stop_tts_app,
     )
@@ -141,7 +141,8 @@ async def status_all():
 async def status_one(service_id: str):
     data = await service_status(service_id)
     if "error" in data:
-        raise HTTPException(404, data["error"])
+        print(data)
+        raise HTTPException(400, data)
     return data
 
 class CancelReq(BaseModel):
