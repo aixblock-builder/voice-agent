@@ -62,3 +62,7 @@ sentence-transformers==3.2.1
 httpx
 sseclient
 fastapi-proxy-lib[standard]
+boto3
+paramiko
+pysmb
+qdrant_client
