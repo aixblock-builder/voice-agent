@@ -36,19 +36,17 @@ async def start_service(
     run_fn_blocking,              # ví dụ run_stt_app_func (sync & blocking)
     health_url: str = None,
     stop_fn: Optional[Callable] = None,  # ví dụ stop_stt_app (tuỳ chọn)
-    health_timeout: float = 30.0,
 ) -> str:
     entry = ServiceEntry(name, model, health_url, stop_fn)
     services[entry.id] = entry
 
     # chạy hàm blocking ở thread → không khoá event loop
     entry.server_task = asyncio.create_task(asyncio.to_thread(run_fn_blocking, model))
-    if health_url:
-        entry.monitor_task = asyncio.create_task(_monitor_health(entry.id, health_timeout))
     return entry.id
 
-async def service_status(service_id: str) -> dict:
+async def service_status(service_id: str, health_timeout: float = 30.0) -> dict:
     e = services.get(service_id)
+    await _monitor_health(service_id, health_timeout)
     if not e:
         return {"error": "service not found"}
     # cập nhật state nếu server_task đã kết thúc
@@ -104,36 +102,46 @@ async def cancel_service(service_id: str, *, kill_by_port: Optional[int] = None)
 
 # ===== Helpers =====
 async def _monitor_health(service_id: str, timeout_s: float) -> None:
-    e = services[service_id]
-    deadline = time.time() + timeout_s
+    e = services.get(service_id)
+    if not e or not e.health_url:
+        print(f"[manager] health-check skipped for {service_id}: no health_url")
+        return
+
+    deadline = time.monotonic() + max(1, timeout_s or 30)
+    last_err = None
+    backoff = 0.5
 
     # tắt verify nếu là https
     verify_flag = False if urlparse(e.health_url).scheme == "https" else True
 
-    try:
-        async with httpx.AsyncClient(verify=verify_flag) as client:
-            while True:
-                if e.server_task and e.server_task.done():
-                    exc = e.server_task.exception()
-                    e.state = "failed" if exc else "stopped"
-                    e.error = str(exc) if exc else None
+    # timeout chi tiết để tránh treo connect/read
+    client_timeout = httpx.Timeout(connect=2.0, read=2.0, write=2.0, pool=2.0)
+    async with httpx.AsyncClient(
+        follow_redirects=True,
+        timeout=client_timeout,
+        # nếu bạn dùng HTTPS tự ký, tắt verify (chỉ khi môi trường tin cậy):
+        verify=verify_flag,
+    ) as client:
+        while time.monotonic() < deadline:
+            try:
+                r = await client.get(e.health_url)
+                if r.status_code == 200:
+                    # tùy bạn: có thể kiểm tra payload: r.json().get("status") == "ok"
+                    e.state = "ready"
+                    e.ready_at = time.time()
+                    e.error = None
                     return
+                else:
+                    last_err = f"HTTP {r.status_code}"
+            except Exception as ex:
+                print(f"[manager] health-check error: {ex}")
+                last_err = str(ex)
 
-                try:
-                    r = await client.get(e.health_url, timeout=2.0)
-                    if r.status_code == 200:
-                        e.state = "ready"
-                        e.ready_at = time.time()
-                        return
-                except httpx.HTTPError:
-                    pass
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 1.7, 5.0)
 
-                if time.time() > deadline and e.state == "starting":
-                    e.state = "timeout"
-                    return
-                await asyncio.sleep(0.25)
-    except asyncio.CancelledError:
-        raise
+    e.state = "timeout"
+    e.error = last_err or "health-check timed out"
 
 def _best_effort_kill_by_port(port: int):
     """Không cần sửa code cũ: kill process bằng port (Linux/macOS)."""
