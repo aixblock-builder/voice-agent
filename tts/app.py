@@ -31,7 +31,11 @@ STREAM_PLAY_SYNC = os.getenv("STREAM_PLAY_SYNC") == 'true'
 if(DEEPSPEED):
   install_deepspeed_based_on_python_version()
 
-app = FastAPI()
+app = FastAPI(
+    title="TTS model",
+    openapi_url="/swagger.json",
+    docs_url="/swagger",
+)
 
 origins = ["*"]
 app.add_middleware(

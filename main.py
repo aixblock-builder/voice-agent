@@ -4,7 +4,7 @@ from typing import Any, Dict, Optional, List, Union, AsyncIterator
 import requests
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request, Body, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, Body, WebSocketDisconnect, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, JSONResponse
 from mcp.server.sse import SseServerTransport
@@ -20,6 +20,7 @@ from utils_voice_agent import (
     setup_app,
     tts_thread,
     stt_thread,
+    stt_folder,
     tts_folder,
     tts_proc,
     stt_proc,
@@ -50,7 +51,11 @@ class DashboardRequest(BaseModel):
     directory: str
 
 
-app = FastAPI()
+app = FastAPI(
+    title="My model",
+    openapi_url="/swagger.json",
+    docs_url="/swagger",
+)
 
 # CORS configuration
 app.add_middleware(
@@ -108,14 +113,20 @@ async def websocket_llm(websocket: WebSocket):
         await websocket.close()
 
 @app.post("/init-stt")
-async def init_stt(model: str = Body(default='mourinhan8/stt', embed=True)):
-    asyncio.create_task(setup_app(model, tts_folder))
+async def init_stt(
+    background_tasks: BackgroundTasks,
+    model: str = Body(default='mourinhan8/stt', embed=True)
+):
+    background_tasks.add_task(lambda: asyncio.run(asyncio.to_thread(setup_app, model, stt_folder)))
     return {"message": "service is initializing"}
 
 @app.post("/init-tts")
-async def init_tts(model: str = Body(default='mourinhan8/tts', embed=True)):
+async def init_tts(
+    background_tasks: BackgroundTasks,
+    model: str = Body(default='mourinhan8/tts', embed=True)
+):
     ensure_portaudio_installed()
-    asyncio.create_task(setup_app(model, tts_folder))
+    background_tasks.add_task(lambda: asyncio.run(asyncio.to_thread(setup_app, model, tts_folder)))
     return {"message": "service is initializing"}
 
 @app.get("/start-voice-agent")
@@ -464,7 +475,7 @@ if __name__ == "__main__":
     uvicorn.run(
         app,
         host="0.0.0.0",
-        port=available_port,
+        port=3000,
         # Bạn cũng có thể thêm các cấu hình khác ở đây
         # ssl_keyfile="ssl/key.pem",
         # ssl_certfile="ssl/cert.pem",

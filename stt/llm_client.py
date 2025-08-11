@@ -6,8 +6,9 @@ from socket_utils import ConnectionManager
 import websockets
 from websockets.client import WebSocketClientProtocol
 import httpx
+import contextlib
 
-TTS_HTTP_URL = "http://localhost:8002/tts-only"
+TTS_HTTP_URL = "http://localhost:1006/tts-only"
 
 class LLMClient:
     """
@@ -41,7 +42,7 @@ class LLMClient:
         while self.is_running:
             try:
                 print("LLMClient: Đang kết nối tới LLM...")
-                async with websockets.connect(self.uri, ssl=self.ssl_context) as ws:
+                async with websockets.connect(self.uri) as ws:
                     self.websocket = ws
                     print("✅ LLMClient: Kết nối thành công tới LLM.")
                     
@@ -91,7 +92,6 @@ class LLMClient:
         fut = self.pending_futures.pop(client_id, None)
         if fut and not fut.done():
             fut.cancel()
-        self.response_buffers.pop(client_id, None)
 
     async def request_response(self, client_id: str, text: str):
         """
@@ -127,15 +127,21 @@ class LLMClient:
             print("LLMClient: Kết nối WebSocket đã được đóng.")
 
 async def llm_tts_pipeline(client_id, prompt, llm_client, manager):
+    tts_task = None
     try:
         response_text = await llm_client.request_response(client_id, prompt)
         if not response_text:
             await manager.send_json_to_client({"error": "LLM returned empty."}, client_id)
             return
-        await get_audio_from_tts_service(client_id, response_text, manager)
+        tts_task = asyncio.create_task(get_audio_from_tts_service(client_id, response_text, manager))
+        await tts_task
     except asyncio.CancelledError:
             # Task bị huỷ khi user gửi prompt mới → im lặng thoát
             print(f"[PIPE] Pipeline client {client_id} bị huỷ (prompt mới).")
+            if tts_task is not None:
+                tts_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await tts_task   # chờ cleanup đóng stream
     except Exception as e:
         print(f"[PIPE] Lỗi pipeline: {e}")
         await manager.send_json_to_client({"error": "Internal pipeline error"}, client_id)

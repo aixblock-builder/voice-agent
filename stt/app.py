@@ -24,12 +24,12 @@ from fastapi.openapi.utils import get_openapi
 manager = ConnectionManager()
 
 app = FastAPI(
-    title="MyModel API",
+    title="Voice agent API",
     openapi_url="/swagger.json",
     docs_url="/swagger",
 )
 
-LLM_WS_URL = "wss://localhost:3000/ws/stream-token"
+LLM_WS_URL = "ws://localhost:3000/ws/stream-token"
 # TTS_WS_URL = "wss://localhost:8002/ws/generate-audio"
 
 # Khởi tạo cả 2 client với các hàm callback tương ứng
@@ -128,7 +128,7 @@ def custom_openapi():
     for prefix, base_url in services_to_merge.items():
         ensure_tag(prefix)
         try:
-            resp = httpx.get(f"{base_url}/openapi.json")
+            resp = httpx.get(f"{base_url}/swagger.json")
             resp.raise_for_status()
             service_schema = resp.json()
 

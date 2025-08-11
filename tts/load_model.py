@@ -44,8 +44,10 @@ if STREAM_MODE or STREAM_MODE_IMPROVE:
     engine = CoquiEngine(specific_model=MODEL_VERSION,use_deepspeed=DEEPSPEED,local_models_path=str(model_path))
     stream = TextToAudioStream(engine)
 else:
-  logger.info(f"Model: '{version_string}' starts to load,wait until it loads")
-  XTTS.load_model() 
+    logger.info(f"Model: '{version_string}' starts to load,wait until it loads")
+    XTTS.load_model() 
+    logger.info(f"Model: '{version_string}' starts to loaded successfully")
+
 
 if USE_CACHE:
     logger.info("You have enabled caching, this option enables caching of results, your results will be saved and if there is a repeat request, you will get a file instead of generation")
