@@ -51,6 +51,8 @@ for i in range(torch.cuda.device_count()):
 os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
     f"{i}" for i in range(len(CUDA_VISIBLE_DEVICES))
 )
+
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 print(os.environ["CUDA_VISIBLE_DEVICES"])
 
 
@@ -715,7 +717,7 @@ class MCPToolsManager:
                 try:
                     # Chạy với timeout trong event loop mới
                     result = loop.run_until_complete(
-                        asyncio.wait_for(single_call(), timeout=60.0)
+                        asyncio.wait_for(single_call(), timeout=180.0)
                     )
                     return result
                 except asyncio.TimeoutError:
@@ -728,7 +730,7 @@ class MCPToolsManager:
             # Chạy trong thread riêng để tránh conflict với existing loop
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(run_in_thread)
-                result = future.result(timeout=35.0)  # Timeout hơi dài hơn async timeout
+                result = future.result(timeout=181.0)  # Timeout hơi dài hơn async timeout
                 return result
                 
         except concurrent.futures.TimeoutError:
@@ -1087,6 +1089,7 @@ class MyModel(AIxBlockMLBase):
                     
                     # Execute tool directly
                     result = MCPToolsManager.call_remote_tool_sse(tool_name, tool_params)
+                    print(result)
                     
                     # Process result
                     if hasattr(result, 'content'):
@@ -1204,17 +1207,12 @@ class MyModel(AIxBlockMLBase):
                     
                     outputs = pipe_prediction.generate(
                         **inputs,
-                        max_new_tokens=512,
-                        temperature=0.7,
-                        do_sample=True,
-                        pad_token_id=tokenizer.eos_token_id
+                        max_new_tokens=32768
                     )
-                    
-                    # Extract response (simplified - no tool call parsing needed)
                     output_ids = outputs[0][len(inputs.input_ids[0]):].tolist()
                     final_response = tokenizer.decode(output_ids, skip_special_tokens=True).strip()
-                    
-                    thinking = "Model generation - no tools detected"
+                    thinking_content = tokenizer.decode(output_ids, skip_special_tokens=True).strip("\n")
+
                     function_calls = []
                     
                     # Add KB info to response if used
