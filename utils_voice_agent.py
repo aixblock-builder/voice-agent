@@ -3,6 +3,7 @@ import subprocess
 import threading
 import shutil
 import queue
+import time
 
 stt_proc = None
 tts_proc = None
@@ -49,8 +50,17 @@ def setup_app(repo: str, folder: str):
     requirements_file = os.path.join(folder, "requirements.txt")
     if os.path.exists(requirements_file):
         subprocess.run(f"venv/bin/pip install -r requirements.txt", shell=True, cwd=folder, check=True)
-
-    load_model(folder)
+    for attempt in range(2):
+        try:
+            load_model(folder)
+            break
+        except Exception as e:
+            if attempt == 0:
+                shutil.rmtree(os.path.join(folder, "models"), ignore_errors=True)
+                print("Load tts model failed, retrying after cleanup...")
+                time.sleep(2)
+            else:
+                raise
 
 
 def load_model(folder):
@@ -99,7 +109,6 @@ def stream_output(pipe, q):
 
 
 def run_stt_app_func():
-
     global stt_proc
     q = queue.Queue()
     try:
@@ -130,8 +139,6 @@ def run_stt_app_func():
 
 
 def run_tts_app_func():
-    tts_model_name = os.getenv("TTS_MODEL_NAME", "mourinhan8/tts-agent")
-    setup_app(tts_model_name, tts_folder)
     global tts_proc
     q = queue.Queue()
     try:

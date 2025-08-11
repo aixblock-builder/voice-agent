@@ -97,6 +97,11 @@
                     return;
                 }
 
+                if (data.type === "transcript") {
+                    log(data.transcript)
+
+                }
+
                 if (data.type === "audio") {
                     handleAudioData(data.audio, data.text, data.text_index, data.is_last);
                 }

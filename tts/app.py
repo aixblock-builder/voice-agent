@@ -31,7 +31,11 @@ STREAM_PLAY_SYNC = os.getenv("STREAM_PLAY_SYNC") == 'true'
 if(DEEPSPEED):
   install_deepspeed_based_on_python_version()
 
-app = FastAPI()
+app = FastAPI(
+    title="TTS model",
+    openapi_url="/swagger.json",
+    docs_url="/swagger",
+)
 
 origins = ["*"]
 app.add_middleware(
@@ -259,7 +263,7 @@ if __name__ == "__main__":
     uvicorn.run(
         app,
         host="0.0.0.0",
-        port=8002,
+        port=1006,
         # ssl_keyfile="ssl/key.pem",
         # ssl_certfile="ssl/cert.pem",
     )
