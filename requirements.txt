@@ -61,4 +61,4 @@ langgraph-sdk==0.1.51
 sentence-transformers==3.2.1
 httpx
 sseclient
-fastapi-proxy-lib[standard]
+psutil

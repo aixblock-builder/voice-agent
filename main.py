@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, JSONResponse
 from mcp.server.sse import SseServerTransport
 from pydantic import BaseModel
+from services_manager import cancel_service, list_services, service_status, start_service
 from starlette.routing import Mount
 from model import MyModel, mcp
 from utils.chat_history import ChatHistoryManager
@@ -17,16 +18,14 @@ from starlette.websockets import WebSocket
 import subprocess
 import atexit
 from utils_voice_agent import (
-    setup_app,
-    tts_thread,
-    stt_thread,
-    stt_folder,
-    tts_folder,
+    run_stt_app_func,
+    run_tts_app_func,
+    stop_stt_app,
+    stop_tts_app,
     tts_proc,
     stt_proc,
     ensure_portaudio_installed,
 )
-from fastapi_proxy_lib.fastapi.app import reverse_http_app
 from starlette.websockets import WebSocket
 
 subprocess.run("venv/bin/python load_model.py", shell=True)
@@ -112,29 +111,48 @@ async def websocket_llm(websocket: WebSocket):
         print(f"❌ Error: {str(e)}")
         await websocket.close()
 
-@app.post("/init-stt")
-async def init_stt(
-    background_tasks: BackgroundTasks,
-    model: str = Body(default='mourinhan8/stt', embed=True)
-):
-    background_tasks.add_task(lambda: asyncio.run(asyncio.to_thread(setup_app, model, stt_folder)))
-    return {"message": "service is initializing"}
-
-@app.post("/init-tts")
-async def init_tts(
-    background_tasks: BackgroundTasks,
-    model: str = Body(default='mourinhan8/tts', embed=True)
+@app.post("/init-voice-agent")
+async def start_voice_agent(
+    stt_model: str = Body(default='mourinhan8/stt', embed=True),
+    tts_model: str = Body(default='mourinhan8/tts', embed=True)
 ):
     ensure_portaudio_installed()
-    background_tasks.add_task(lambda: asyncio.run(asyncio.to_thread(setup_app, model, tts_folder)))
-    return {"message": "service is initializing"}
+    stt_id = await start_service(
+        name="stt",
+        model=stt_model,
+        health_url=None,
+        run_fn_blocking=run_stt_app_func,
+        stop_fn=stop_stt_app,
+    )
+    tts_id = await start_service(
+        name="tts",
+        model=tts_model,
+        health_url=None,
+        run_fn_blocking=run_tts_app_func,
+        stop_fn=stop_tts_app,
+    )
+    return {"message": "starting", "services": {"stt": stt_id, "tts": tts_id}}
 
-@app.get("/start-voice-agent")
-async def start_voice_agent():
-    stt_thread.start()
-    tts_thread.start()
-    return {"message": "starting services", "port": 1005 }
+@app.get("/voice-agent/status")
+async def status_all():
+    return await list_services()
 
+@app.get("/voice-agent/status/{service_id}")
+async def status_one(service_id: str):
+    data = await service_status(service_id)
+    if "error" in data:
+        raise HTTPException(404, data["error"])
+    return data
+
+class CancelReq(BaseModel):
+    port: int | None = None
+
+@app.post("/voice-agent/cancel/{service_id}")
+async def cancel_one(service_id: str, body: CancelReq):
+    data = await cancel_service(service_id, kill_by_port=body.port)
+    if "error" in data:
+        raise HTTPException(404, data["error"])
+    return data
 
 @app.post("/mcp/register")
 async def register_mcp_server(

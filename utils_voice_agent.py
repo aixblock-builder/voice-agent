@@ -4,6 +4,7 @@ import threading
 import shutil
 import queue
 import time
+import contextlib
 
 stt_proc = None
 tts_proc = None
@@ -108,7 +109,8 @@ def stream_output(pipe, q):
         pipe.close()
 
 
-def run_stt_app_func():
+def run_stt_app_func(model):
+    setup_app(model, stt_folder)
     global stt_proc
     q = queue.Queue()
     try:
@@ -138,7 +140,8 @@ def run_stt_app_func():
             print(f"Process returned with code: {stt_proc.returncode}")
 
 
-def run_tts_app_func():
+def run_tts_app_func(model):
+    setup_app(model, tts_folder)
     global tts_proc
     q = queue.Queue()
     try:
@@ -168,6 +171,22 @@ def run_tts_app_func():
         if tts_proc:
             print(f"Process returned with code: {tts_proc.returncode}")
 
+# STT
+def stop_stt_app():
+    with contextlib.suppress(Exception):
+        if stt_proc and stt_proc.poll() is None:
+            stt_proc.terminate()
+            try:
+                stt_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                stt_proc.kill()
 
-stt_thread = threading.Thread(target=run_stt_app_func, daemon=True)
-tts_thread = threading.Thread(target=run_tts_app_func, daemon=True)
+# TTS (tương tự nếu bạn có tts_proc)
+def stop_tts_app():
+    with contextlib.suppress(Exception):
+        if tts_proc and tts_proc.poll() is None:
+            tts_proc.terminate()
+            try:
+                tts_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                tts_proc.kill()
