@@ -33,6 +33,13 @@ from typing import List, Dict, Any
 import hashlib
 import io
 import tempfile
+from pydantic import BaseModel, Field
+from typing import Optional, Dict, Any
+import re
+from langchain.prompts import PromptTemplate
+from langchain.output_parsers import PydanticOutputParser, OutputFixingParser
+from langchain.schema import BaseOutputParser
+
 
 # ------------------------------------------------------------------------------
 HfFolder.save_token("hf_"+"bjIxyaTXDGqlUa"+"HjvuhcpfVkPjcvjitRsY")
@@ -44,6 +51,8 @@ for i in range(torch.cuda.device_count()):
 os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
     f"{i}" for i in range(len(CUDA_VISIBLE_DEVICES))
 )
+
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 print(os.environ["CUDA_VISIBLE_DEVICES"])
 
 
@@ -201,15 +210,46 @@ class KnowledgeBaseManager:
         bucket = storage_conn["s3BucketName"]
         response = s3_client.list_objects_v2(Bucket=bucket, MaxKeys=50)
         
+        import zipfile
+        import xml.etree.ElementTree as ET
+        import io
+
+        def extract_text_from_docx(docx_content):
+            """Extract text from DOCX file without external libraries"""
+            try:
+                with zipfile.ZipFile(io.BytesIO(docx_content)) as zip_file:
+                    # Read the main document XML
+                    xml_content = zip_file.read('word/document.xml')
+                    root = ET.fromstring(xml_content)
+                    
+                    # Extract all text nodes
+                    text_parts = []
+                    for elem in root.iter():
+                        if elem.text:
+                            text_parts.append(elem.text)
+                    
+                    return '\n'.join(text_parts)
+            except Exception as e:
+                return f"Error reading DOCX: {e}"
+
         for obj in response.get('Contents', []):
             if obj['Key'].endswith(('.txt', '.md', '.json', '.pdf', '.docx')):
                 try:
                     file_obj = s3_client.get_object(Bucket=bucket, Key=obj['Key'])
-                    content = file_obj['Body'].read().decode('utf-8', errors='ignore')
+                    
+                    if obj['Key'].endswith('.docx'):
+                        # Xử lý file DOCX bằng cách extract từ ZIP
+                        doc_content = file_obj['Body'].read()
+                        content = extract_text_from_docx(doc_content)
+                    else:
+                        # Xử lý các file text khác
+                        content = file_obj['Body'].read().decode('utf-8', errors='ignore')
+                    
+                    print("===============", content)
                     documents.append(f"File: {obj['Key']}\n{content}")
                 except Exception as e:
                     logger.error(f"S3 file load failed {obj['Key']}: {e}")
-        
+
         return documents
     
     @staticmethod
@@ -385,7 +425,72 @@ class KnowledgeBaseManager:
             
         except Exception as e:
             return {"error": f"Update failed: {str(e)}"}
+
+class ToolCall(BaseModel):
+    """Tool call model for parsing"""
+    tool_name: Optional[str] = Field(None, description="Name of the tool to call")
+    parameters: Dict[str, Any] = Field(default_factory=dict, description="Parameters for the tool")
+    confidence: float = Field(0.0, description="Confidence score")
+
+class FastToolParser(BaseOutputParser):
+    """Fast regex-based tool parser"""
+    
+    def parse(self, text: str) -> ToolCall:
+        # Try structured format first
+        tool_pattern = r'TOOL_CALL:([^:]+):(\{.*\})'
+        match = re.search(tool_pattern, text)
         
+        if match:
+            tool_name = match.group(1).strip()
+            try:
+                params = json.loads(match.group(2))
+                return ToolCall(tool_name=tool_name, parameters=params, confidence=0.9)
+            except:
+                pass
+        
+        # Fallback to keyword extraction
+        return self._extract_by_keywords(text)
+    
+    def _extract_by_keywords(self, text: str) -> ToolCall:
+        text_lower = text.lower()
+        
+        # Define tool keywords mapping
+        tool_keywords = {}
+        for tool_name, info in MCP_TOOLS_REGISTRY.items():
+            keywords = []
+            
+            # Extract from tool name
+            name_parts = tool_name.lower().split('.')
+            keywords.extend(name_parts)
+            
+            # Extract from description
+            desc = info.get('description', '').lower()
+            if 'generate' in desc or 'create' in desc:
+                keywords.extend(['generate', 'create', 'make'])
+            if 'chat' in desc or 'ask' in desc:
+                keywords.extend(['chat', 'ask', 'question'])
+            if 'image' in desc or 'picture' in desc:
+                keywords.extend(['image', 'picture', 'photo'])
+            
+            tool_keywords[tool_name] = keywords
+        
+        # Score tools by keyword matches
+        scores = {}
+        for tool_name, keywords in tool_keywords.items():
+            score = sum(1 for keyword in keywords if keyword in text_lower)
+            if score > 0:
+                scores[tool_name] = score
+        
+        if scores:
+            best_tool = max(scores, key=scores.get)
+            return ToolCall(
+                tool_name=best_tool,
+                parameters={},
+                confidence=min(scores[best_tool] * 0.3, 0.8)
+            )
+        
+        return ToolCall()
+            
 class MCPToolsManager:
     """Simplified MCP Tools Manager with auto-discovery support"""
     TOOLS = []  # Biến lưu trữ tools tạm thời
@@ -612,7 +717,7 @@ class MCPToolsManager:
                 try:
                     # Chạy với timeout trong event loop mới
                     result = loop.run_until_complete(
-                        asyncio.wait_for(single_call(), timeout=60.0)
+                        asyncio.wait_for(single_call(), timeout=180.0)
                     )
                     return result
                 except asyncio.TimeoutError:
@@ -625,7 +730,7 @@ class MCPToolsManager:
             # Chạy trong thread riêng để tránh conflict với existing loop
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(run_in_thread)
-                result = future.result(timeout=35.0)  # Timeout hơi dài hơn async timeout
+                result = future.result(timeout=181.0)  # Timeout hơi dài hơn async timeout
                 return result
                 
         except concurrent.futures.TimeoutError:
@@ -682,6 +787,191 @@ class MCPToolsManager:
             prompt += "\n"
         
         return prompt
+
+    @staticmethod
+    def fast_extract_tool_langchain(prompt: str):
+        """Ultra-fast tool extraction using LangChain without model loading"""
+        if not MCP_TOOLS_REGISTRY:
+            return None, prompt, "no_tools"
+        
+        # Create parser
+        parser = FastToolParser()
+        
+        # Try direct parsing first (if user used structured format)
+        try:
+            result = parser.parse(prompt)
+            if result.tool_name and result.tool_name in MCP_TOOLS_REGISTRY:
+                # Fill missing parameters
+                validated_params = MCPToolsManager._smart_fill_parameters(
+                    result.tool_name, result.parameters, prompt
+                )
+                return result.tool_name, validated_params, f"direct_parse_{result.confidence:.2f}"
+        except Exception as e:
+            logger.debug(f"Direct parsing failed: {e}")
+        
+        # Use semantic matching
+        best_match = MCPToolsManager._semantic_tool_matching(prompt)
+        if best_match:
+            tool_name, confidence = best_match
+            params = MCPToolsManager._smart_fill_parameters(tool_name, {}, prompt)
+            return tool_name, params, f"semantic_{confidence:.2f}"
+        
+        # Final fallback: intent classification
+        intent_result = MCPToolsManager._classify_intent(prompt)
+        if intent_result:
+            return intent_result
+        
+        return None, prompt, "no_match"
+
+    @staticmethod
+    def _semantic_tool_matching(prompt: str):
+        """Semantic matching using TF-IDF similarity (no model needed)"""
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        from sklearn.metrics.pairwise import cosine_similarity
+        import numpy as np
+        
+        try:
+            # Prepare documents
+            documents = [prompt]
+            tool_texts = []
+            tool_names = []
+            
+            for tool_name, info in MCP_TOOLS_REGISTRY.items():
+                # Combine name and description
+                text = f"{tool_name.replace('.', ' ')} {info.get('description', '')}"
+                tool_texts.append(text)
+                tool_names.append(tool_name)
+                documents.append(text)
+            
+            # Calculate TF-IDF similarity
+            vectorizer = TfidfVectorizer(stop_words='english', max_features=1000)
+            tfidf_matrix = vectorizer.fit_transform(documents)
+            
+            # Get similarity scores
+            similarities = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:]).flatten()
+            
+            # Find best match
+            best_idx = np.argmax(similarities)
+            best_score = similarities[best_idx]
+            
+            if best_score > 0.1:  # Minimum threshold
+                return tool_names[best_idx], best_score
+                
+        except Exception as e:
+            logger.debug(f"Semantic matching failed: {e}")
+        
+        return None
+
+    @staticmethod
+    def _classify_intent(prompt: str):
+        """Simple intent classification using keyword patterns"""
+        patterns = {
+            'generation': ['generate', 'create', 'make', 'write', 'produce'],
+            'question': ['ask', 'question', 'what', 'how', 'why', 'explain'],
+            'image': ['image', 'picture', 'photo', 'visual', 'draw'],
+            'chat': ['chat', 'talk', 'conversation', 'discuss'],
+            'search': ['search', 'find', 'look for', 'query']
+        }
+        
+        prompt_lower = prompt.lower()
+        intent_scores = {}
+        
+        for intent, keywords in patterns.items():
+            score = sum(1 for keyword in keywords if keyword in prompt_lower)
+            if score > 0:
+                intent_scores[intent] = score
+        
+        if not intent_scores:
+            return None
+        
+        # Map intent to tools
+        best_intent = max(intent_scores, key=intent_scores.get)
+        
+        # Find tools matching intent
+        matching_tools = []
+        for tool_name, info in MCP_TOOLS_REGISTRY.items():
+            desc = info.get('description', '').lower()
+            
+            if best_intent == 'generation' and any(word in desc for word in ['generate', 'create']):
+                matching_tools.append(tool_name)
+            elif best_intent == 'question' and any(word in desc for word in ['ask', 'chat', 'answer']):
+                matching_tools.append(tool_name)
+            elif best_intent == 'image' and 'image' in desc:
+                matching_tools.append(tool_name)
+        
+        if matching_tools:
+            tool_name = matching_tools[0]  # Take first match
+            params = MCPToolsManager._smart_fill_parameters(tool_name, {}, prompt)
+            confidence = intent_scores[best_intent] * 0.2
+            return tool_name, params, f"intent_{best_intent}_{confidence:.2f}"
+        
+        return None
+
+    @staticmethod
+    def _smart_fill_parameters(tool_name: str, existing_params: Dict, prompt: str):
+        """Intelligently fill missing parameters"""
+        if tool_name not in MCP_TOOLS_REGISTRY:
+            return existing_params
+        
+        tool_info = MCP_TOOLS_REGISTRY[tool_name]
+        schema_params = tool_info.get('parameters', {})
+        required_params = tool_info.get('required', [])
+        
+        filled_params = existing_params.copy()
+        
+        # Extract values from prompt using regex patterns
+        prompt_lower = prompt.lower()
+        
+        for param_name, param_info in schema_params.items():
+            if param_name in filled_params:
+                continue
+                
+            param_type = param_info.get('type', 'string')
+            
+            # Common parameter extraction patterns
+            if param_name in ['prompt', 'query', 'text', 'message', 'input']:
+                # Extract main request (remove common prefixes)
+                clean_prompt = re.sub(r'^(please |can you |could you |generate |create |make )', '', prompt, flags=re.IGNORECASE).strip()
+                filled_params[param_name] = clean_prompt
+                
+            elif param_name in ['model', 'model_name'] and param_type == 'string':
+                # Extract model names from prompt
+                model_patterns = [
+                    r'gpt-?[\d\w-]+',
+                    r'claude-?[\d\w-]+', 
+                    r'gemini-?[\d\w-]+',
+                    r'using ([a-zA-Z0-9-_]+)',
+                    r'with model ([a-zA-Z0-9-_]+)'
+                ]
+                for pattern in model_patterns:
+                    match = re.search(pattern, prompt, re.IGNORECASE)
+                    if match:
+                        filled_params[param_name] = match.group(1) if match.groups() else match.group(0)
+                        break
+                        
+            elif param_name in ['temperature'] and param_type in ['number', 'float']:
+                # Extract temperature values
+                temp_match = re.search(r'temperature\s*[=:]?\s*([0-9.]+)', prompt_lower)
+                if temp_match:
+                    filled_params[param_name] = float(temp_match.group(1))
+                    
+            elif param_name in ['max_tokens', 'length'] and param_type in ['integer', 'number']:
+                # Extract numeric values
+                num_match = re.search(rf'{param_name}\s*[=:]?\s*(\d+)', prompt_lower)
+                if num_match:
+                    filled_params[param_name] = int(num_match.group(1))
+        
+        # Fill remaining required parameters with defaults
+        for req_param in required_params:
+            if req_param not in filled_params:
+                if req_param in schema_params:
+                    param_info = schema_params[req_param]
+                    if 'default' in param_info:
+                        filled_params[req_param] = param_info['default']
+                    else:
+                        filled_params[req_param] = MCPToolsManager._get_example_value(req_param, param_info)
+        
+        return filled_params
 
 class MyModel(AIxBlockMLBase):
     """Main model class with MCP tools management"""
@@ -745,6 +1035,7 @@ class MyModel(AIxBlockMLBase):
             if not prompt:
                 return {"error": "Prompt required", "session_id": session_id}
             
+            # 📚 Knowledge Base Context
             kb_context = ""
             kb_used = []
             if use_knowledge_base and KNOWLEDGE_BASES:
@@ -767,232 +1058,203 @@ class MyModel(AIxBlockMLBase):
                 conversation_history = chat_manager.get_session_history(session_id, limit=max_history)
                 logger.info(f"📚 Loaded {len(conversation_history)} messages")
             
-            # 🏭 Load Model
-            def ensure_model_loaded():
-                global pipe_prediction, tokenizer, model_predict
-                
-                if pipe_prediction and model_predict == model_id:
-                    return
-                
-                gc.collect()
-                torch.cuda.empty_cache()
-                
-                # Determine source
-                model_name = model_id.split("/")[-1]
-                local_path = f"./data/checkpoint/{model_name}"
-                source = local_path if os.path.exists(f"{local_path}/config.json") else model_id
-                
-                if hf_token:
-                    login(token=hf_token)
-                
-                tokenizer = AutoTokenizer.from_pretrained(source)
-                
-                if torch.cuda.is_available():
-                    dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-                    pipe_prediction = AutoModelForCausalLM.from_pretrained(source, torch_dtype=dtype, device_map="auto")
-                else:
-                    pipe_prediction = AutoModelForCausalLM.from_pretrained(source, device_map="cpu")
-                
-                model_predict = model_id
-                logger.info(f"✅ Model loaded: {model_id}")
+            # ⚡ Fast Tool Detection (before model loading)
+            function_calls = []
+            final_response = ""
+            thinking = ""
             
-            ensure_model_loaded()
-            
-            with torch.no_grad():
-                # 🗨️ Build Messages
-                messages = []
-                
-                # System prompt for function calling
-                if enable_function_calling and MCP_TOOLS_REGISTRY:
-                    tools_info = MCPToolsManager.generate_tools_prompt()
-                    messages.append({
-                        "role": "system", 
-                        "content": f"""You are an intelligent assistant with access to tools:
-
-        {tools_info}
-
-        FUNCTION CALLING PARSING RULES:
-        1. **Split user request into MAIN TASK + PARAMETERS**
-        2. **Main task**: What user wants (before "using", "with", "set")  
-        3. **Parameters**: Specific settings mentioned after "using", "with", "set"
-        4. **Format**: TOOL_CALL:tool_name:{{"prompt":"main_task","param":"value"}}
-
-        PARSING PATTERNS:
-        - "Generate X using model Y" → prompt="Generate X", model="Y"
-        - "Create X, using model in params is Y" → prompt="Create X", model="Y" 
-        - "Write X with temperature 0.5" → prompt="Write X", temperature=0.5
-        - "Generate X, set model to Y and temperature to Z" → prompt="Generate X", model="Y", temperature=Z
-
-        EXAMPLES:
-        User: "Generate a short story using gpt-4-turbo"
-        → TOOL_CALL:mcp.openai-ask_chatgpt:{{"prompt": "Generate a short story", "model": "gpt-4-turbo"}}
-
-        User: "Write a poem with temperature 0.8 and model gpt-4"
-        → TOOL_CALL:mcp.openai-ask_chatgpt:{{"prompt": "Write a poem", "model": "gpt-4", "temperature": 0.8}}
-
-        **KEY**: Extract the MAIN REQUEST (what to generate) as prompt, then add mentioned parameters."""
-                    })
-                
+            if enable_function_calling and MCP_TOOLS_REGISTRY:
+                # Ultra-fast tool extraction (no model needed)
+                enriched_prompt = prompt
                 if kb_context:
-                    messages.append({
-                        "role": "system",
-                        "content": f"""KNOWLEDGE BASE CONTEXT:
+                    enriched_prompt = f"{prompt}\n\nKnowledge Base Context:\n{kb_context}..."
+                    
+                tool_name, tool_params, extraction_method = MCPToolsManager.fast_extract_tool_langchain(enriched_prompt)
+                
+                if tool_name:
+                    logger.info(f"🔧 Tool detected: {tool_name} via {extraction_method}")
+                    
+                    # Add KB context to tool parameters if relevant
+                    if kb_context and 'context' not in tool_params and 'knowledge' not in tool_params:
+                        # Check if tool accepts context parameter
+                        tool_info = MCP_TOOLS_REGISTRY.get(tool_name, {})
+                        tool_schema = tool_info.get('parameters', {})
+                        
+                        # Add context if tool has context/knowledge parameters
+                        for param_name in tool_schema.keys():
+                            if any(keyword in param_name.lower() for keyword in ['context', 'knowledge', 'background', 'info']):
+                                tool_params[param_name] = kb_context[:1000]  # Limit context size
+                                logger.info(f"📚 Added KB context to {param_name}")
+                                break
+                    
+                    # Execute tool directly
+                    result = MCPToolsManager.call_remote_tool_sse(tool_name, tool_params)
+                    print(result)
+                    
+                    # Process result
+                    if hasattr(result, 'content'):
+                        if hasattr(result.content, '__iter__') and not isinstance(result.content, str):
+                            content_text = ""
+                            for item in result.content:
+                                if hasattr(item, 'text'):
+                                    content_text += item.text
+                                elif isinstance(item, dict) and 'text' in item:
+                                    content_text += item['text']
+                                else:
+                                    content_text += str(item)
+                            final_response = content_text
+                        else:
+                            final_response = str(result.content)
+                    elif isinstance(result, dict):
+                        if "error" in result:
+                            final_response = f"❌ Tool error: {result['error']}"
+                        else:
+                            content = result.get('content', str(result))
+                            # Extract meaningful content from JSON
+                            if '"output":' in content:
+                                try:
+                                    import re
+                                    output_match = re.search(r'"output":\s*"([^"]*(?:\\.[^"]*)*)"', content)
+                                    if output_match:
+                                        content = output_match.group(1).replace('\\"', '"').replace('\\n', '\n')
+                                except:
+                                    pass
+                            final_response = content
+                    else:
+                        final_response = str(result)
+                    
+                    # Record function call
+                    function_calls = [{
+                        "tool": tool_name,
+                        "params": tool_params,
+                        "result": {"content": final_response, "success": "error" not in str(result).lower()},
+                        "success": True,
+                        "extraction_method": extraction_method
+                    }]
+                    
+                    thinking = f"Tool extracted: {tool_name} via {extraction_method}. KB context: {len(kb_context)} chars"
+                    
+                    # Add KB context info to response if used
+                    if kb_used:
+                        kb_info = f"\n\n📚 *Used knowledge from: {', '.join(kb_used)}*"
+                        final_response += kb_info
+                
+            # 🤖 Fallback to model generation if no tool detected
+            if not final_response:
+                logger.info("🤖 No tool detected or tool failed, using model generation")
+                
+                # 🏭 Load Model
+                def ensure_model_loaded():
+                    global pipe_prediction, tokenizer, model_predict
+                    
+                    if pipe_prediction and model_predict == model_id:
+                        return
+                    
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                    
+                    # Determine source
+                    model_name = model_id.split("/")[-1]
+                    local_path = f"./data/checkpoint/{model_name}"
+                    source = local_path if os.path.exists(f"{local_path}/config.json") else model_id
+                    
+                    if hf_token:
+                        login(token=hf_token)
+                    
+                    tokenizer = AutoTokenizer.from_pretrained(source)
+                    
+                    if torch.cuda.is_available():
+                        dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+                        pipe_prediction = AutoModelForCausalLM.from_pretrained(source, torch_dtype=dtype, device_map="auto")
+                    else:
+                        pipe_prediction = AutoModelForCausalLM.from_pretrained(source, device_map="cpu")
+                    
+                    model_predict = model_id
+                    logger.info(f"✅ Model loaded: {model_id}")
+                
+                ensure_model_loaded()
+                
+                with torch.no_grad():
+                    # 🗨️ Build Messages
+                    messages = []
+                    
+                    # System prompt (simplified since tools handled separately)
+                    if kb_context:
+                        messages.append({
+                            "role": "system",
+                            "content": f"""KNOWLEDGE BASE CONTEXT:
         {kb_context}
 
         Use this context to answer questions when relevant. Always prioritize accuracy from the knowledge base over general knowledge."""
-                    })
-                
-                # Add history
-                for turn in conversation_history:
-                    user_msg = turn.get('user_message', '').strip()
-                    bot_msg = turn.get('bot_response', '').strip()
-                    if user_msg and bot_msg:
-                        messages.extend([
-                            {"role": "user", "content": user_msg},
-                            {"role": "assistant", "content": bot_msg}
-                        ])
-                
-                # Current prompt
-                messages.append({"role": "user", "content": prompt})
-                
-                # 🚀 Generate
-                chat_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-                inputs = tokenizer([chat_text], return_tensors="pt").to(pipe_prediction.device)
-                
-                outputs = pipe_prediction.generate(
-                    **inputs,
-                    max_new_tokens=512,
-                    temperature=0.7,
-                    do_sample=True,
-                    pad_token_id=tokenizer.eos_token_id
-                )
-                
-                # Extract response
-                output_ids = outputs[0][len(inputs.input_ids[0]):].tolist()
-                try:
-                    thinking_end = len(output_ids) - output_ids[::-1].index(151668)
-                except ValueError:
-                    thinking_end = 0
-                
-                thinking = tokenizer.decode(output_ids[:thinking_end], skip_special_tokens=True).strip()
-                response = tokenizer.decode(output_ids[thinking_end:], skip_special_tokens=True).strip()
-                
-                # 🔧 Process Function Calls
-                function_calls = []
-                final_response = response
-                
-                if enable_function_calling and "TOOL_CALL:" in response:
-                    lines = []
-                    for line in response.split('\n'):
-                        line = line.strip()
-                        if line.startswith("TOOL_CALL:"):
-                            try:
-                                # Parse: TOOL_CALL:tool_name:{"param": "value"}
-                                parts = line[10:].split(':', 1)
-                                if len(parts) != 2:
-                                    lines.append("❌ Invalid tool format")
-                                    continue
-                                
-                                tool_name, params_str = parts
-                                params = json.loads(params_str.strip()) if params_str.strip() else {}
-                                
-                                # Execute tool
-                                result = MCPToolsManager.call_remote_tool_sse(tool_name.strip(), params)
-                                
-                                # Handle CallToolResult object properly
-                                if hasattr(result, 'content'):
-                                    # Extract content from MCP CallToolResult
-                                    if hasattr(result.content, '__iter__') and not isinstance(result.content, str):
-                                        # Handle list of content items
-                                        content_text = ""
-                                        for item in result.content:
-                                            if hasattr(item, 'text'):
-                                                content_text += item.text
-                                            elif isinstance(item, dict) and 'text' in item:
-                                                content_text += item['text']
-                                            else:
-                                                content_text += str(item)
-                                        result_content = content_text
-                                    else:
-                                        result_content = str(result.content)
-                                    
-                                    processed_result = {
-                                        "content": result_content,
-                                        "success": True
-                                    }
-                                elif isinstance(result, dict):
-                                    processed_result = result
-                                else:
-                                    processed_result = {"content": str(result), "success": True}
-                                
-                                function_calls.append({
-                                    "tool": tool_name.strip(),
-                                    "params": params,
-                                    "result": processed_result,
-                                    "success": processed_result.get("success", "error" not in processed_result)
-                                })
-                                
-                                # Add result to response
-                                if "error" in processed_result:
-                                    lines.append(f"❌ {tool_name}: {processed_result['error']}")
-                                else:
-                                    content = processed_result.get('content', str(processed_result))
-                                    # Extract meaningful content, skip technical info
-                                    if isinstance(content, str):
-                                        # Try to extract the actual response from JSON or technical output
-                                        if '"output":' in content:
-                                            try:
-                                                import re
-                                                output_match = re.search(r'"output":\s*"([^"]*(?:\\.[^"]*)*)"', content)
-                                                if output_match:
-                                                    content = output_match.group(1).replace('\\"', '"').replace('\\n', '\n')
-                                            except:
-                                                pass
-                                        
-                                        # Truncate for display
-                                        display_content = content[:200] + "..." if len(content) > 200 else content
-                                        lines.append(f"✅ {tool_name} result:\n{display_content}")
-                                    else:
-                                        lines.append(f"✅ {tool_name}: Executed successfully")
-                                    
-                            except Exception as e:
-                                lines.append(f"❌ Tool error: {str(e)}")
-                                logger.error(f"Function call failed: {e}")
-                        else:
-                            lines.append(line)
+                        })
                     
-                    final_response = '\n'.join(lines)
-                
-                # 💾 Save to History
-                if use_history:
-                    try:
-                        chat_manager.save_conversation_turn(
-                            session_id=session_id,
-                            user_message=prompt,
-                            bot_response=final_response,
-                            metadata={
-                                "model_id": model_id,
-                                "function_calls": len(function_calls),
-                                "thinking": thinking[:100] + "..." if len(thinking) > 100 else thinking
-                            }
-                        )
-                        logger.info(f"💾 Saved to session {session_id}")
-                    except Exception as e:
-                        logger.error(f"❌ Save failed: {e}")
-                
-                # 🎯 Return Response
-                return {
-                    "success": True,
-                    "session_id": session_id,
-                    "response": final_response,
-                    "thinking": thinking,
-                    "function_calls": function_calls,
-                    "metadata": {
-                        "model_id": model_id,
-                        "history_turns": len(conversation_history),
-                        "tools_used": len(function_calls)
-                    }
+                    # Add history
+                    for turn in conversation_history:
+                        user_msg = turn.get('user_message', '').strip()
+                        bot_msg = turn.get('bot_response', '').strip()
+                        if user_msg and bot_msg:
+                            messages.extend([
+                                {"role": "user", "content": user_msg},
+                                {"role": "assistant", "content": bot_msg}
+                            ])
+                    
+                    # Current prompt
+                    messages.append({"role": "user", "content": prompt})
+                    
+                    # 🚀 Generate
+                    chat_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                    inputs = tokenizer([chat_text], return_tensors="pt").to(pipe_prediction.device)
+                    
+                    outputs = pipe_prediction.generate(
+                        **inputs,
+                        max_new_tokens=32768
+                    )
+                    output_ids = outputs[0][len(inputs.input_ids[0]):].tolist()
+                    final_response = tokenizer.decode(output_ids, skip_special_tokens=True).strip()
+                    thinking_content = tokenizer.decode(output_ids, skip_special_tokens=True).strip("\n")
+
+                    function_calls = []
+                    
+                    # Add KB info to response if used
+                    if kb_used:
+                        kb_info = f"\n\n📚 *Referenced knowledge from: {', '.join(kb_used)}*"
+                        final_response += kb_info
+            
+            # 💾 Save to History
+            if use_history:
+                try:
+                    chat_manager.save_conversation_turn(
+                        session_id=session_id,
+                        user_message=prompt,
+                        bot_response=final_response,
+                        metadata={
+                            "model_id": model_id,
+                            "function_calls": len(function_calls),
+                            "thinking": thinking[:100] + "..." if len(thinking) > 100 else thinking,
+                            "kb_used": kb_used,
+                            "extraction_method": function_calls[0]["extraction_method"] if function_calls else "none"
+                        }
+                    )
+                    logger.info(f"💾 Saved to session {session_id}")
+                except Exception as e:
+                    logger.error(f"❌ Save failed: {e}")
+            
+            # 🎯 Return Response
+            return {
+                "success": True,
+                "session_id": session_id,
+                "response": final_response,
+                "thinking": thinking,
+                "function_calls": function_calls,
+                "metadata": {
+                    "model_id": model_id,
+                    "history_turns": len(conversation_history),
+                    "tools_used": len(function_calls),
+                    "kb_bases_used": kb_used,
+                    "extraction_method": function_calls[0]["extraction_method"] if function_calls else "model_generation",
+                    "kb_context_chars": len(kb_context)
                 }
+            }
 
     @mcp.tool()
     def model(self, **kwargs):
