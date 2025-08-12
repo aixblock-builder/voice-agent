@@ -24,7 +24,7 @@ from langchain_community.vectorstores import Chroma, Qdrant
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 import psycopg2
-import redis
+from datetime import datetime
 import boto3
 import ftplib
 import paramiko
@@ -36,10 +36,9 @@ import tempfile
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any
 import re
-from langchain.prompts import PromptTemplate
-from langchain.output_parsers import PydanticOutputParser, OutputFixingParser
+from langchain.prompts import PromptTemplate, FewShotPromptTemplate
 from langchain.schema import BaseOutputParser
-
+import redis
 
 # ------------------------------------------------------------------------------
 HfFolder.save_token("hf_"+"bjIxyaTXDGqlUa"+"HjvuhcpfVkPjcvjitRsY")
@@ -54,7 +53,6 @@ os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 print(os.environ["CUDA_VISIBLE_DEVICES"])
-
 
 
 mcp = FastMCP("aixblock-mcp")
@@ -75,6 +73,150 @@ REMOTE_MCP_CONNECTIONS = {}
 TOOLS = []
 
 KNOWLEDGE_BASES = {}  # Store active knowledge base connections
+
+# 📝 Prompt Templates Registry
+CUSTOM_TEMPLATES = {
+    "system": {
+        "template": """You are an AI assistant.
+
+Instructions:
+- Use knowledge base information when relevant
+- For tool usage, respond with: TOOL_CALL:tool_name:{{"param": "value"}}
+- Always provide helpful, accurate responses""",
+        "input_variables": ["kb_context", "has_tools"],
+        "description": "Default system message template"
+    },
+    "tool_detection": {
+        "template": "Query: {query}\nResponse:",
+        "input_variables": ["query"],
+        "description": "Simple tool detection template"
+    },
+    "context_assembly": {
+        "template": """You are an AI assistant.
+
+Instructions:
+- Use knowledge base information when relevant
+- Always provide helpful, accurate responses
+
+CONVERSATION HISTORY:
+{history}
+
+KNOWLEDGE BASE:
+{kb_context}""",
+        "input_variables": ["history", "kb_context"],
+        "description": "Context assembly template"
+    }
+}
+
+class PromptTemplateManager:
+    """Centralized prompt template management with dynamic updates"""
+    
+    @staticmethod
+    def get_template(template_name: str) -> PromptTemplate:
+        """Get template by name"""
+        if template_name not in CUSTOM_TEMPLATES:
+            return None
+        
+        print(CUSTOM_TEMPLATES)
+        
+        config = CUSTOM_TEMPLATES[template_name]
+
+        return PromptTemplate(
+            input_variables=config["input_variables"],
+            template=config["template"]
+        )
+    
+    @staticmethod
+    def get_system_template():
+        """System message template with KB and tools context"""
+        template = PromptTemplateManager.get_template("system")
+        if template:
+            return template
+        # Fallback default
+        return PromptTemplate(
+            input_variables=["kb_context", "has_tools"],
+            template="""You are an AI assistant{tools_info}.
+
+{kb_section}
+
+Instructions:
+- Use knowledge base information when relevant
+- For tool usage, respond with: TOOL_CALL:tool_name:{{"param": "value"}}
+- Always provide helpful, accurate responses""",
+            partial_variables={
+                "tools_info": " with access to external tools" if MCP_TOOLS_REGISTRY else "",
+                "kb_section": "{kb_context}" if "{kb_context}" else "",
+            }
+        )
+    
+    @staticmethod
+    def get_context_assembly_template(template_name = "context_assembly"):
+        """Template for combining multiple context sources"""
+        template = PromptTemplateManager.get_template(template_name)
+        if template:
+            return template
+        # Fallback default    
+        return PromptTemplate(
+            input_variables=["history", "kb_context"],
+            template="""CONVERSATION HISTORY:
+{history}
+
+KNOWLEDGE BASE:
+{kb_context}
+
+"""
+        )
+    
+    @staticmethod
+    def update_template(template_name: str, template_text: str, input_variables: list, description: str = ""):
+        """Update or create a custom template"""
+        CUSTOM_TEMPLATES[template_name] = {
+            "template": template_text,
+            "input_variables": input_variables,
+            "description": description,
+            "updated_at": str(datetime.now())
+        }
+        return {"success": True, "message": f"Template '{template_name}' updated"}
+    
+    @staticmethod
+    def list_templates():
+        """List all available templates"""
+        return {
+            "templates": {name: {
+                "description": config.get("description", ""),
+                "variables": config["input_variables"],
+                "updated_at": config.get("updated_at", "system_default")
+            } for name, config in CUSTOM_TEMPLATES.items()},
+            "count": len(CUSTOM_TEMPLATES)
+        }
+    
+    @staticmethod
+    def delete_template(template_name: str):
+        """Delete a custom template"""
+        if template_name not in CUSTOM_TEMPLATES:
+            return {"error": f"Template '{template_name}' not found"}
+        
+        # Don't delete system templates
+        if template_name in ["system", "tool_detection", "context_assembly"]:
+            return {"error": "Cannot delete system templates"}
+        
+        del CUSTOM_TEMPLATES[template_name]
+        return {"success": True, "message": f"Template '{template_name}' deleted"}
+    
+    @staticmethod
+    def validate_template(template_text: str, input_variables: list):
+        """Validate template syntax"""
+        try:
+            test_template = PromptTemplate(
+                input_variables=input_variables,
+                template=template_text
+            )
+            # Test format with dummy values
+            test_values = {var: f"test_{var}" for var in input_variables}
+            test_template.format(**test_values)
+            return {"valid": True, "message": "Template is valid"}
+        except Exception as e:
+            return {"valid": False, "message": f"Template validation failed: {str(e)}"}
 
 class KnowledgeBaseManager:
     """Manage knowledge base connections and queries"""
@@ -245,7 +387,6 @@ class KnowledgeBaseManager:
                         # Xử lý các file text khác
                         content = file_obj['Body'].read().decode('utf-8', errors='ignore')
                     
-                    print("===============", content)
                     documents.append(f"File: {obj['Key']}\n{content}")
                 except Exception as e:
                     logger.error(f"S3 file load failed {obj['Key']}: {e}")
@@ -387,7 +528,8 @@ class KnowledgeBaseManager:
             try:
                 docs = vectorstore.similarity_search(query, k=limit)
                 if docs:
-                    kb_context = f"[From {kb_name}]:\n" + "\n".join([doc.page_content for doc in docs])
+                    # kb_context = f"[From {kb_name}]:\n" + "\n".join([doc.page_content for doc in docs])
+                    kb_context = f"\n" + "\n".join([doc.page_content for doc in docs])
                     all_context.append(kb_context)
             except Exception as e:
                 logger.error(f"KB search failed for {kb_name}: {e}")
@@ -432,68 +574,447 @@ class ToolCall(BaseModel):
     parameters: Dict[str, Any] = Field(default_factory=dict, description="Parameters for the tool")
     confidence: float = Field(0.0, description="Confidence score")
 
-class FastToolParser(BaseOutputParser):
-    """Fast regex-based tool parser"""
+class AIToolExtractor:
+    """AI-based tool extraction using sentence similarity"""
     
-    def parse(self, text: str) -> ToolCall:
-        # Try structured format first
-        tool_pattern = r'TOOL_CALL:([^:]+):(\{.*\})'
-        match = re.search(tool_pattern, text)
-        
-        if match:
-            tool_name = match.group(1).strip()
+    def __init__(self):
+        self.embeddings_model = None
+        self.vectorizer = None
+        self.use_tfidf = False
+        self._load_model()
+    
+    def _load_model(self):
+        """Load sentence transformer for similarity matching"""
+        try:
+            from sentence_transformers import SentenceTransformer
+            # Use lightweight sentence transformer
+            self.embeddings_model = SentenceTransformer('all-MiniLM-L6-v2')
+            print("✅ Loaded SentenceTransformer model")
+        except ImportError:
             try:
-                params = json.loads(match.group(2))
-                return ToolCall(tool_name=tool_name, parameters=params, confidence=0.9)
-            except:
-                pass
-        
-        # Fallback to keyword extraction
-        return self._extract_by_keywords(text)
+                # Fallback to sklearn TF-IDF if sentence-transformers not available
+                from sklearn.feature_extraction.text import TfidfVectorizer
+                from sklearn.metrics.pairwise import cosine_similarity
+                import numpy as np
+                self.vectorizer = TfidfVectorizer(stop_words='english', max_features=1000)
+                self.use_tfidf = True
+                print("✅ Using TF-IDF fallback")
+            except ImportError:
+                print("⚠️ No ML libraries available, using rule-based matching")
+                self.embeddings_model = None
+                self.use_tfidf = False
     
-    def _extract_by_keywords(self, text: str) -> ToolCall:
+    def extract_tool_info(self, text: str, available_tools: Dict[str, Any]) -> tuple:
+        """Extract tool name and parameters using similarity matching"""
+        if not available_tools:
+            return None, {}, 0.0
+        
+        # Prepare tool descriptions for similarity matching
+        tool_texts = []
+        tool_names = []
+        
+        for tool_name, info in available_tools.items():
+            tool_desc = f"{tool_name} {info.get('description', '')}"
+            tool_texts.append(tool_desc)
+            tool_names.append(tool_name)
+        
+        # Find best matching tool
+        best_tool, confidence = self._find_best_match(text, tool_texts, tool_names)
+        print("===best_tool===", best_tool)
+        print("===confidence===", confidence)
+        
+        params = self._extract_params_with_ner(text, available_tools[best_tool])
+        return best_tool, params, confidence
+
+    
+    def _find_best_match(self, query: str, tool_texts: list, tool_names: list) -> tuple:
+        """Find best matching tool using embeddings or TF-IDF"""
+        if self.embeddings_model:
+            # Use sentence transformers
+            try:
+                query_embedding = self.embeddings_model.encode([query])
+                tool_embeddings = self.embeddings_model.encode(tool_texts)
+                
+                from sklearn.metrics.pairwise import cosine_similarity
+                similarities = cosine_similarity(query_embedding, tool_embeddings)[0]
+                best_idx = similarities.argmax()
+                confidence = float(similarities[best_idx])
+                
+                return tool_names[best_idx], confidence
+            except Exception as e:
+                print(f"SentenceTransformer failed: {e}")
+                
+        if self.use_tfidf and self.vectorizer:
+            # Use TF-IDF fallback
+            try:
+                all_texts = tool_texts + [query]
+                tfidf_matrix = self.vectorizer.fit_transform(all_texts)
+                
+                from sklearn.metrics.pairwise import cosine_similarity
+                similarities = cosine_similarity(tfidf_matrix[-1], tfidf_matrix[:-1])[0]
+                best_idx = similarities.argmax()
+                confidence = float(similarities[best_idx])
+                
+                return tool_names[best_idx], confidence
+            except Exception as e:
+                print(f"TF-IDF failed: {e}")
+        
+        # Rule-based fallback
+        best_tool = None
+        best_score = 0
+        
+        query_lower = query.lower()
+        for i, tool_name in enumerate(tool_names):
+            score = 0
+            # Direct name match
+            if tool_name.lower() in query_lower:
+                score += 0.8
+            # Partial name match
+            tool_parts = tool_name.lower().split('.')
+            if any(part in query_lower for part in tool_parts):
+                score += 0.5
+            # Description word match
+            tool_desc = tool_texts[i].lower()
+            common_words = set(query_lower.split()) & set(tool_desc.split())
+            score += len(common_words) * 0.1
+            
+            if score > best_score:
+                best_score = score
+                best_tool = tool_name
+        
+        return best_tool, min(best_score, 0.9)
+    
+    def _extract_params_with_ner(self, text: str, tool_info: Dict) -> Dict[str, Any]:
+        """Extract parameters using AI model"""
+        schema = tool_info.get('parameters', {})
+        print("===schema===", schema)
+        return self._ai_extract_params(text, schema)
+    
+    def _ai_extract_params(self, text: str, schema: Dict) -> Dict[str, Any]:
+        """Use AI to extract all parameters from text"""
+        params = {}
+        print("===text===", text)
+        print("===schema===", schema)
+        
+        if not schema:
+            return params
+        
+        try:
+            # First try direct regex extraction for all parameters at once
+            params = self._extract_all_params_regex(text, schema)
+            
+            # If AI model is available, enhance extraction for missing parameters
+            if self.embeddings_model and len(params) < len(schema):
+                missing_params = set(schema.keys()) - set(params.keys())
+                
+                for param_name in missing_params:
+                    param_info = schema[param_name]
+                    
+                    # Create context-aware queries
+                    queries = [
+                        f"{param_name}",
+                        f"parameter {param_name}",
+                        f"{param_name} value",
+                        f"set {param_name}"
+                    ]
+                    
+                    # Split text into meaningful chunks
+                    chunks = self._create_text_chunks(text, param_name)
+                    
+                    best_value = None
+                    best_score = 0
+                    
+                    for query in queries:
+                        if not chunks:
+                            continue
+                            
+                        query_embedding = self.embeddings_model.encode([query])
+                        chunk_embeddings = self.embeddings_model.encode(chunks)
+                        
+                        from sklearn.metrics.pairwise import cosine_similarity
+                        similarities = cosine_similarity(query_embedding, chunk_embeddings)[0]
+                        
+                        max_idx = similarities.argmax()
+                        if similarities[max_idx] > best_score:
+                            best_score = similarities[max_idx]
+                            value = self._extract_value_from_chunk(chunks[max_idx], param_name, param_info)
+                            if value is not None:
+                                best_value = value
+                    
+                    if best_value is not None and best_score > 0.1:
+                        params[param_name] = best_value
+                            
+        except Exception as e:
+            print(f"AI param extraction failed: {e}")
+            # Fallback to regex-only extraction
+            params = self._extract_all_params_regex(text, schema)
+            
+        return params
+
+    def _extract_value_from_chunk(self, chunk: str, param_name: str, param_info: Dict) -> any:
+        """Extract parameter value from text chunk using enhanced pattern matching"""
+        chunk_lower = chunk.lower()
+        param_lower = param_name.lower()
+        
+        import re
+        
+        # Enhanced patterns with better capturing groups and flexibility
+        patterns = [
+            # Direct colon patterns: "param: value" or "param:value"
+            rf"{re.escape(param_lower)}\s*:\s*([^,\s]+(?:\.\d+)?)",
+            rf"{re.escape(param_lower)}\s*:\s*([^,]+?)(?:\s*,\s*\w+\s*[:=]|\s*$)",
+            rf"{re.escape(param_lower)}\s*:\s*'([^']*)'",  # quoted values
+            rf"{re.escape(param_lower)}\s*:\s*\"([^\"]*)\"",  # double quoted
+            
+            # Equals patterns: "param = value" or "param=value" 
+            rf"{re.escape(param_lower)}\s*=\s*([^,\s]+(?:\.\d+)?)",
+            rf"{re.escape(param_lower)}\s*=\s*([^,]+?)(?:\s*,\s*\w+\s*[:=]|\s*$)",
+            
+            # Natural language patterns
+            rf"{re.escape(param_lower)}\s+(?:is\s+)?set\s+to\s+([^,\s]+(?:\.\d+)?)",
+            rf"{re.escape(param_lower)}\s+(?:is\s+)?([^,\s]+(?:\.\d+)?)(?:\s*,|\s*and|\s*$)",
+            
+            # "with param value" patterns
+            rf"with\s+{re.escape(param_lower)}\s+([^,\s]+(?:\.\d+)?)",
+            rf"with\s+{re.escape(param_lower)}\s*:\s*([^,\s]+(?:\.\d+)?)",
+            
+            # Value before param patterns: "value param"  
+            rf"([^,\s]+(?:\.\d+)?)\s+{re.escape(param_lower)}(?:\s*,|\s*and|\s*$)",
+            
+            # Quoted values
+            rf"{re.escape(param_lower)}\s*[:=]\s*['\"]([^'\"]+)['\"]",
+            rf"['\"]([^'\"]*{re.escape(param_lower)}[^'\"]*)['\"]",
+        ]
+        
+        for pattern in patterns:
+            matches = re.finditer(pattern, chunk_lower)
+            for match in matches:
+                # Get the actual text from original chunk (preserving case)
+                start_pos = match.start(1) 
+                end_pos = match.end(1)
+                
+                # Map back to original chunk to preserve case
+                value = chunk[start_pos:end_pos].strip().strip("'\"").strip()
+                
+                if value and not value.isspace():
+                    converted = self._convert_param_type(value, param_info)
+                    if converted is not None:
+                        return converted
+        
+        # Special handling for numeric values that might be standalone
+        if param_info.get('type') in ['integer', 'number', 'float']:
+            # Look for standalone numbers near the parameter name
+            words = chunk.split()
+            param_words = param_lower.split()
+            
+            for i, word in enumerate(words):
+                if any(pw in word.lower() for pw in param_words):
+                    # Check surrounding words for numbers
+                    for j in range(max(0, i-2), min(len(words), i+3)):
+                        if j != i:
+                            number_match = re.match(r'^-?\d*\.?\d+$', words[j].strip(',:'))
+                            if number_match:
+                                converted = self._convert_param_type(number_match.group(), param_info)
+                                if converted is not None:
+                                    return converted
+        
+        return None
+
+    def _extract_all_params_regex(self, text: str, schema: Dict) -> Dict[str, Any]:
+        """Extract all parameters using regex patterns - helper method"""
+        params = {}
         text_lower = text.lower()
         
-        # Define tool keywords mapping
-        tool_keywords = {}
+        import re
+        
+        for param_name, param_info in schema.items():
+            param_lower = param_name.lower()
+            
+        # Comprehensive pattern list for this parameter
+            patterns = [
+                rf"{re.escape(param_lower)}\s*:\s*'([^']*)'",  # quoted values first
+                rf"{re.escape(param_lower)}\s*:\s*\"([^\"]*)\"",
+                rf"{re.escape(param_lower)}\s*:\s*([^,]+?)(?:\s*,\s*\w+\s*[:=]|\s*$)",  # long values
+                rf"{re.escape(param_lower)}\s*:\s*([^,\s]+(?:\.\d+)?)",  # short values
+                rf"{re.escape(param_lower)}\s*=\s*([^,\s]+(?:\.\d+)?)",
+                rf"with\s+{re.escape(param_lower)}\s+([^,\s]+(?:\.\d+)?)",
+                rf"{re.escape(param_lower)}\s+set\s+to\s+([^,\s]+(?:\.\d+)?)",
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, text_lower)
+                if match:
+                    # Get actual value from original text
+                    start_pos = match.start(1)
+                    end_pos = match.end(1)
+                    value = text[start_pos:end_pos].strip().strip("'\"")
+                    
+                    converted = self._convert_param_type(value, param_info)
+                    if converted is not None:
+                        params[param_name] = converted
+                        break
+        
+        return params
+
+    def _create_text_chunks(self, text: str, param_name: str) -> list:
+        """Create meaningful text chunks for parameter extraction"""
+        chunks = []
+        
+        # Split by common delimiters
+        for delimiter in [',', ';', ' and ', ' with ']:
+            parts = text.split(delimiter)
+            chunks.extend([part.strip() for part in parts if part.strip()])
+        
+        # Add sentences containing the parameter name
+        sentences = [s.strip() for s in text.replace(',', '.').split('.') if s.strip()]
+        param_sentences = [s for s in sentences if param_name.lower() in s.lower()]
+        chunks.extend(param_sentences)
+        
+        # Add the full text as fallback
+        chunks.append(text)
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_chunks = []
+        for chunk in chunks:
+            if chunk not in seen:
+                seen.add(chunk)
+                unique_chunks.append(chunk)
+        
+        return unique_chunks
+
+    def _convert_param_type(self, value: str, param_info: Dict) -> any:
+        """Convert string value to appropriate type"""
+        if not value:
+            return None
+        
+        print("===value===", value)
+        param_type = param_info.get('type', 'string')
+        
+        try:
+            if param_type == 'integer':
+                # Extract first number found
+                import re
+                numbers = re.findall(r'-?\d+', value)
+                return int(numbers[0]) if numbers else None
+            elif param_type in ['number', 'float']:
+                # Extract first decimal number found  
+                import re
+                numbers = re.findall(r'-?\d*\.?\d+', value)
+                return float(numbers[0]) if numbers else None
+            elif param_type == 'boolean':
+                return value.lower() in ['true', '1', 'yes', 'on']
+            else:
+                # For string type, return clean value
+                return value
+        except:
+            return None
+
+class EnhancedToolParser(BaseOutputParser):
+    """Enhanced tool parser with AI model support"""
+    
+    def __init__(self, **data):
+        super().__init__(**data)
+        object.__setattr__(self, 'ai_extractor', AIToolExtractor())
+    
+    def parse(self, kb_context: str, text: str) -> ToolCall:
+        if self.ai_extractor:
+            tool_name, params, confidence = self.ai_extractor.extract_tool_info(text, MCP_TOOLS_REGISTRY)
+            print("===tool_name===", tool_name)
+            print("===params===", params)
+
+            if "prompt" in params:
+                params["prompt"] = params["prompt"] + "\n\n" + kb_context
+
+            return ToolCall(tool_name=tool_name, parameters=params, confidence=confidence)
+        
+        # 4. Fallback to semantic matching
+        return self._semantic_match_with_template(text)
+    
+    def _parse_natural_params(self, param_text: str) -> Dict[str, Any]:
+        """Parse parameters from natural language"""
+        params = {}
+        if not param_text.strip():
+            return params
+        
+        # Common patterns
+        patterns = [
+            (r'prompt:\s*([^,]+?)(?:,|$)', 'prompt'),
+            (r'model\s+is\s+([^\s,]+)', 'model'),
+            (r'temperature:\s*([0-9.]+)', 'temperature'),
+            (r'max_tokens:\s*(\d+)', 'max_tokens'),
+        ]
+        
+        for pattern, param_name in patterns:
+            match = re.search(pattern, param_text, re.IGNORECASE)
+            if match:
+                value = match.group(1).strip()
+                # Convert numeric values
+                if param_name in ['temperature'] and value.replace('.', '').isdigit():
+                    params[param_name] = float(value)
+                elif param_name in ['max_tokens'] and value.isdigit():
+                    params[param_name] = int(value)
+                else:
+                    params[param_name] = value
+        
+        # If no specific patterns found, treat as prompt
+        if not params and param_text.strip():
+            params['prompt'] = param_text.strip()
+        
+        return params
+    
+    def _semantic_match_with_template(self, text: str) -> ToolCall:
+        """Fallback semantic matching"""
+        if not MCP_TOOLS_REGISTRY:
+            return ToolCall()
+        
+        best_tool = None
+        best_score = 0
+        
+        text_lower = text.lower()
         for tool_name, info in MCP_TOOLS_REGISTRY.items():
-            keywords = []
+            # Score by description similarity
+            desc_words = info.get('description', '').lower().split()
+            score = sum(1 for word in desc_words if word in text_lower)
             
-            # Extract from tool name
+            # Boost for name matches
             name_parts = tool_name.lower().split('.')
-            keywords.extend(name_parts)
+            if any(part in text_lower for part in name_parts):
+                score += 2
             
-            # Extract from description
-            desc = info.get('description', '').lower()
-            if 'generate' in desc or 'create' in desc:
-                keywords.extend(['generate', 'create', 'make'])
-            if 'chat' in desc or 'ask' in desc:
-                keywords.extend(['chat', 'ask', 'question'])
-            if 'image' in desc or 'picture' in desc:
-                keywords.extend(['image', 'picture', 'photo'])
-            
-            tool_keywords[tool_name] = keywords
+            if score > best_score:
+                best_score = score
+                best_tool = tool_name
         
-        # Score tools by keyword matches
-        scores = {}
-        for tool_name, keywords in tool_keywords.items():
-            score = sum(1 for keyword in keywords if keyword in text_lower)
-            if score > 0:
-                scores[tool_name] = score
-        
-        if scores:
-            best_tool = max(scores, key=scores.get)
-            return ToolCall(
-                tool_name=best_tool,
-                parameters={},
-                confidence=min(scores[best_tool] * 0.3, 0.8)
-            )
+        if best_tool and best_score > 0:
+            params = self._extract_params_from_text(best_tool, text)
+            confidence = min(best_score * 0.2, 0.7)
+            return ToolCall(tool_name=best_tool, parameters=params, confidence=confidence)
         
         return ToolCall()
-            
+    
+    def _extract_params_from_text(self, tool_name: str, text: str) -> Dict[str, Any]:
+        """Extract parameters using improved heuristics"""
+        tool_info = MCP_TOOLS_REGISTRY.get(tool_name, {})
+        params_schema = tool_info.get('parameters', {})
+        
+        extracted = {}
+        for param_name, param_info in params_schema.items():
+            if param_name in ['prompt', 'query', 'text', 'message']:
+                # Clean main request
+                clean_text = re.sub(r'^(please |can you |generate |create |using action [^\s]+ with param is )', '', text, flags=re.IGNORECASE).strip()
+                extracted[param_name] = clean_text
+                
+            elif param_name == 'model' and 'model' in text.lower():
+                model_match = re.search(r'model[:\s]+([a-zA-Z0-9-_]+)', text, re.IGNORECASE)
+                if model_match:
+                    extracted[param_name] = model_match.group(1)
+        
+        return extracted
+             
 class MCPToolsManager:
-    """Simplified MCP Tools Manager with auto-discovery support"""
-    TOOLS = []  # Biến lưu trữ tools tạm thời
+    """Enhanced MCP Tools Manager with PromptTemplate support"""
+    TOOLS = []
     RESULTS = None
     
     @staticmethod
@@ -755,226 +1276,25 @@ class MCPToolsManager:
         return {"valid": True, "message": "Valid"}
     
     @staticmethod
-    def generate_tools_prompt():
-        """Generate concise tools description for AI"""
-        if not MCP_TOOLS_REGISTRY:
-            return "No tools available."
-        
-        prompt = "Available tools:\n\n"
-        for tool_name, info in MCP_TOOLS_REGISTRY.items():
-            prompt += f"🔧 **{tool_name}**\n"
-            prompt += f"   {info['description']}\n"
-            
-            # Show key parameters
-            params = info.get('parameters', {})
-            if params:
-                key_params = []
-                for param, details in params.items():
-                    param_type = details.get('type', 'string')
-                    if details.get('default'):
-                        key_params.append(f"{param}({param_type}, default: {details['default']})")
-                    else:
-                        key_params.append(f"{param}({param_type})")
-                prompt += f"   Parameters: {', '.join(key_params[:5])}{'...' if len(key_params) > 5 else ''}\n"
-            
-            if info['required']:
-                prompt += f"   Required: {', '.join(info['required'])}\n"
-            
-            if info['examples']:
-                example = info['examples'][0]
-                prompt += f"   Example: TOOL_CALL:{tool_name}:{json.dumps(example)}\n"
-            
-            prompt += "\n"
-        
-        return prompt
-
-    @staticmethod
-    def fast_extract_tool_langchain(prompt: str):
-        """Ultra-fast tool extraction using LangChain without model loading"""
+    def fast_extract_tool_enhanced(kb_context: str, prompt: str):
+        """Enhanced tool extraction using PromptTemplate"""
         if not MCP_TOOLS_REGISTRY:
             return None, prompt, "no_tools"
         
-        # Create parser
-        parser = FastToolParser()
+        # Use enhanced parser with template support
+        parser = EnhancedToolParser()
         
-        # Try direct parsing first (if user used structured format)
         try:
-            result = parser.parse(prompt)
+            result = parser.parse(kb_context, prompt)
             if result.tool_name and result.tool_name in MCP_TOOLS_REGISTRY:
-                # Fill missing parameters
-                validated_params = MCPToolsManager._smart_fill_parameters(
-                    result.tool_name, result.parameters, prompt
-                )
-                return result.tool_name, validated_params, f"direct_parse_{result.confidence:.2f}"
+                return result.tool_name, result.parameters, f"enhanced_{result.confidence:.2f}"
         except Exception as e:
-            logger.debug(f"Direct parsing failed: {e}")
-        
-        # Use semantic matching
-        best_match = MCPToolsManager._semantic_tool_matching(prompt)
-        if best_match:
-            tool_name, confidence = best_match
-            params = MCPToolsManager._smart_fill_parameters(tool_name, {}, prompt)
-            return tool_name, params, f"semantic_{confidence:.2f}"
-        
-        # Final fallback: intent classification
-        intent_result = MCPToolsManager._classify_intent(prompt)
-        if intent_result:
-            return intent_result
+            logger.debug(f"Enhanced parsing failed: {e}")
         
         return None, prompt, "no_match"
 
-    @staticmethod
-    def _semantic_tool_matching(prompt: str):
-        """Semantic matching using TF-IDF similarity (no model needed)"""
-        from sklearn.feature_extraction.text import TfidfVectorizer
-        from sklearn.metrics.pairwise import cosine_similarity
-        import numpy as np
-        
-        try:
-            # Prepare documents
-            documents = [prompt]
-            tool_texts = []
-            tool_names = []
-            
-            for tool_name, info in MCP_TOOLS_REGISTRY.items():
-                # Combine name and description
-                text = f"{tool_name.replace('.', ' ')} {info.get('description', '')}"
-                tool_texts.append(text)
-                tool_names.append(tool_name)
-                documents.append(text)
-            
-            # Calculate TF-IDF similarity
-            vectorizer = TfidfVectorizer(stop_words='english', max_features=1000)
-            tfidf_matrix = vectorizer.fit_transform(documents)
-            
-            # Get similarity scores
-            similarities = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:]).flatten()
-            
-            # Find best match
-            best_idx = np.argmax(similarities)
-            best_score = similarities[best_idx]
-            
-            if best_score > 0.1:  # Minimum threshold
-                return tool_names[best_idx], best_score
-                
-        except Exception as e:
-            logger.debug(f"Semantic matching failed: {e}")
-        
-        return None
-
-    @staticmethod
-    def _classify_intent(prompt: str):
-        """Simple intent classification using keyword patterns"""
-        patterns = {
-            'generation': ['generate', 'create', 'make', 'write', 'produce'],
-            'question': ['ask', 'question', 'what', 'how', 'why', 'explain'],
-            'image': ['image', 'picture', 'photo', 'visual', 'draw'],
-            'chat': ['chat', 'talk', 'conversation', 'discuss'],
-            'search': ['search', 'find', 'look for', 'query']
-        }
-        
-        prompt_lower = prompt.lower()
-        intent_scores = {}
-        
-        for intent, keywords in patterns.items():
-            score = sum(1 for keyword in keywords if keyword in prompt_lower)
-            if score > 0:
-                intent_scores[intent] = score
-        
-        if not intent_scores:
-            return None
-        
-        # Map intent to tools
-        best_intent = max(intent_scores, key=intent_scores.get)
-        
-        # Find tools matching intent
-        matching_tools = []
-        for tool_name, info in MCP_TOOLS_REGISTRY.items():
-            desc = info.get('description', '').lower()
-            
-            if best_intent == 'generation' and any(word in desc for word in ['generate', 'create']):
-                matching_tools.append(tool_name)
-            elif best_intent == 'question' and any(word in desc for word in ['ask', 'chat', 'answer']):
-                matching_tools.append(tool_name)
-            elif best_intent == 'image' and 'image' in desc:
-                matching_tools.append(tool_name)
-        
-        if matching_tools:
-            tool_name = matching_tools[0]  # Take first match
-            params = MCPToolsManager._smart_fill_parameters(tool_name, {}, prompt)
-            confidence = intent_scores[best_intent] * 0.2
-            return tool_name, params, f"intent_{best_intent}_{confidence:.2f}"
-        
-        return None
-
-    @staticmethod
-    def _smart_fill_parameters(tool_name: str, existing_params: Dict, prompt: str):
-        """Intelligently fill missing parameters"""
-        if tool_name not in MCP_TOOLS_REGISTRY:
-            return existing_params
-        
-        tool_info = MCP_TOOLS_REGISTRY[tool_name]
-        schema_params = tool_info.get('parameters', {})
-        required_params = tool_info.get('required', [])
-        
-        filled_params = existing_params.copy()
-        
-        # Extract values from prompt using regex patterns
-        prompt_lower = prompt.lower()
-        
-        for param_name, param_info in schema_params.items():
-            if param_name in filled_params:
-                continue
-                
-            param_type = param_info.get('type', 'string')
-            
-            # Common parameter extraction patterns
-            if param_name in ['prompt', 'query', 'text', 'message', 'input']:
-                # Extract main request (remove common prefixes)
-                clean_prompt = re.sub(r'^(please |can you |could you |generate |create |make )', '', prompt, flags=re.IGNORECASE).strip()
-                filled_params[param_name] = clean_prompt
-                
-            elif param_name in ['model', 'model_name'] and param_type == 'string':
-                # Extract model names from prompt
-                model_patterns = [
-                    r'gpt-?[\d\w-]+',
-                    r'claude-?[\d\w-]+', 
-                    r'gemini-?[\d\w-]+',
-                    r'using ([a-zA-Z0-9-_]+)',
-                    r'with model ([a-zA-Z0-9-_]+)'
-                ]
-                for pattern in model_patterns:
-                    match = re.search(pattern, prompt, re.IGNORECASE)
-                    if match:
-                        filled_params[param_name] = match.group(1) if match.groups() else match.group(0)
-                        break
-                        
-            elif param_name in ['temperature'] and param_type in ['number', 'float']:
-                # Extract temperature values
-                temp_match = re.search(r'temperature\s*[=:]?\s*([0-9.]+)', prompt_lower)
-                if temp_match:
-                    filled_params[param_name] = float(temp_match.group(1))
-                    
-            elif param_name in ['max_tokens', 'length'] and param_type in ['integer', 'number']:
-                # Extract numeric values
-                num_match = re.search(rf'{param_name}\s*[=:]?\s*(\d+)', prompt_lower)
-                if num_match:
-                    filled_params[param_name] = int(num_match.group(1))
-        
-        # Fill remaining required parameters with defaults
-        for req_param in required_params:
-            if req_param not in filled_params:
-                if req_param in schema_params:
-                    param_info = schema_params[req_param]
-                    if 'default' in param_info:
-                        filled_params[req_param] = param_info['default']
-                    else:
-                        filled_params[req_param] = MCPToolsManager._get_example_value(req_param, param_info)
-        
-        return filled_params
-
 class MyModel(AIxBlockMLBase):
-    """Main model class with MCP tools management"""
+    """Main model class with enhanced MCP tools management"""
     
     @mcp.tool()
     def action(self, command, **kwargs):
@@ -1018,9 +1338,58 @@ class MyModel(AIxBlockMLBase):
         elif command.lower() == "kb_update":
             name = kwargs.get("name", "")
             return KnowledgeBaseManager.update_knowledge_base(name)
+        
+        # 📝 Prompt Template Management Commands
+        elif command.lower() == "template_update":
+            template_name = kwargs.get("template_name", "")
+            template_text = kwargs.get("template_text", "")
+            input_variables = kwargs.get("input_variables", [])
+            description = kwargs.get("description", "")
+            
+            if not template_name or not template_text:
+                return {"error": "template_name and template_text required"}
+            
+            # Validate first
+            validation = PromptTemplateManager.validate_template(template_text, input_variables)
+            if not validation["valid"]:
+                return {"error": f"Template validation failed: {validation['message']}"}
+            
+            return PromptTemplateManager.update_template(template_name, template_text, input_variables, description)
+        
+        elif command.lower() == "template_list":
+            return PromptTemplateManager.list_templates()
+        
+        elif command.lower() == "template_get":
+            template_name = kwargs.get("template_name", "")
+            if not template_name:
+                return {"error": "template_name required"}
+            
+            if template_name not in CUSTOM_TEMPLATES:
+                return {"error": f"Template '{template_name}' not found"}
+            
+            return {
+                "template": CUSTOM_TEMPLATES[template_name],
+                "name": template_name
+            }
+        
+        elif command.lower() == "template_delete":
+            template_name = kwargs.get("template_name", "")
+            if not template_name:
+                return {"error": "template_name required"}
+            
+            return PromptTemplateManager.delete_template(template_name)
+        
+        elif command.lower() == "template_validate":
+            template_text = kwargs.get("template_text", "")
+            input_variables = kwargs.get("input_variables", [])
+            
+            if not template_text:
+                return {"error": "template_text required"}
+            
+            return PromptTemplateManager.validate_template(template_text, input_variables)
 
         elif command.lower() == "predict":
-            # 🤖 Streamlined Agent Predict Command
+            # 🤖 Enhanced Agent Predict Command with PromptTemplate
             
             # Extract parameters
             prompt = kwargs.get("prompt") or kwargs.get("text", "")
@@ -1031,6 +1400,7 @@ class MyModel(AIxBlockMLBase):
             use_knowledge_base = kwargs.get("use_knowledge_base", True)
             max_history = kwargs.get("max_history", 5)
             hf_token = kwargs.get("push_to_hub_token", "hf_"+"bjIxyaTXDGqlUa"+"HjvuhcpfVkPjcvjitRsY")
+            template_name = kwargs.get("template_name", "context_assembly")
             
             if not prompt:
                 return {"error": "Prompt required", "session_id": session_id}
@@ -1039,7 +1409,7 @@ class MyModel(AIxBlockMLBase):
             kb_context = ""
             kb_used = []
             if use_knowledge_base and KNOWLEDGE_BASES:
-                kb_context = KnowledgeBaseManager.search_all_knowledge_bases(prompt, limit=3)
+                kb_context = KnowledgeBaseManager.search_all_knowledge_bases(prompt, limit=10)
                 if kb_context:
                     kb_used = list(KNOWLEDGE_BASES.keys())
                     logger.info(f"📚 KB context from {len(kb_used)} bases: {len(kb_context)} chars")
@@ -1058,18 +1428,15 @@ class MyModel(AIxBlockMLBase):
                 conversation_history = chat_manager.get_session_history(session_id, limit=max_history)
                 logger.info(f"📚 Loaded {len(conversation_history)} messages")
             
-            # ⚡ Fast Tool Detection (before model loading)
+            # ⚡ Enhanced Tool Detection with PromptTemplate
             function_calls = []
             final_response = ""
             thinking = ""
             
             if enable_function_calling and MCP_TOOLS_REGISTRY:
-                # Ultra-fast tool extraction (no model needed)
-                enriched_prompt = prompt
-                if kb_context:
-                    enriched_prompt = f"{prompt}\n\nKnowledge Base Context:\n{kb_context}..."
-                    
-                tool_name, tool_params, extraction_method = MCPToolsManager.fast_extract_tool_langchain(enriched_prompt)
+                # Enhanced tool extraction using templates
+                
+                tool_name, tool_params, extraction_method = MCPToolsManager.fast_extract_tool_enhanced(kb_context, prompt)
                 
                 if tool_name:
                     logger.info(f"🔧 Tool detected: {tool_name} via {extraction_method}")
@@ -1132,7 +1499,7 @@ class MyModel(AIxBlockMLBase):
                         "extraction_method": extraction_method
                     }]
                     
-                    thinking = f"Tool extracted: {tool_name} via {extraction_method}. KB context: {len(kb_context)} chars"
+                    thinking = f"Enhanced tool extraction: {tool_name} via {extraction_method}. KB context: {len(kb_context)} chars"
                     
                     # Add KB context info to response if used
                     if kb_used:
@@ -1175,31 +1542,34 @@ class MyModel(AIxBlockMLBase):
                 ensure_model_loaded()
                 
                 with torch.no_grad():
-                    # 🗨️ Build Messages
+                    # 🗨️ Build Messages using PromptTemplate
                     messages = []
                     
-                    # System prompt (simplified since tools handled separately)
-                    if kb_context:
-                        messages.append({
-                            "role": "system",
-                            "content": f"""KNOWLEDGE BASE CONTEXT:
-        {kb_context}
-
-        Use this context to answer questions when relevant. Always prioritize accuracy from the knowledge base over general knowledge."""
-                        })
+                    # Enhanced system prompt using template
+                    if kb_context or MCP_TOOLS_REGISTRY:
+                        system_template = PromptTemplateManager.get_context_assembly_template(template_name)
+                        history_text = "\n".join([f"User: {turn.get('user_message', '')}\nBot: {turn.get('bot_response', '')}" 
+                                            for turn in conversation_history[-10:]])
+                        system_msg = system_template.format(
+                            history=history_text,
+                            kb_context=kb_context
+                        )
+                        messages.append({"role": "system", "content": system_msg})
                     
-                    # Add history
-                    for turn in conversation_history:
-                        user_msg = turn.get('user_message', '').strip()
-                        bot_msg = turn.get('bot_response', '').strip()
-                        if user_msg and bot_msg:
-                            messages.extend([
-                                {"role": "user", "content": user_msg},
-                                {"role": "assistant", "content": bot_msg}
-                            ])
+                    # # Add history
+                    # for turn in conversation_history:
+                    #     user_msg = turn.get('user_message', '').strip()
+                    #     bot_msg = turn.get('bot_response', '').strip()
+                    #     if user_msg and bot_msg:
+                    #         messages.extend([
+                    #             {"role": "user", "content": user_msg},
+                    #             {"role": "assistant", "content": bot_msg}
+                    #         ])
                     
                     # Current prompt
                     messages.append({"role": "user", "content": prompt})
+
+                    print("===messages===", messages)
                     
                     # 🚀 Generate
                     chat_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -1210,15 +1580,16 @@ class MyModel(AIxBlockMLBase):
                         max_new_tokens=32768
                     )
                     output_ids = outputs[0][len(inputs.input_ids[0]):].tolist()
-                    final_response = tokenizer.decode(output_ids, skip_special_tokens=True).strip()
-                    thinking_content = tokenizer.decode(output_ids, skip_special_tokens=True).strip("\n")
+                    try:
+                        # rindex finding 151668 (</think>)
+                        index = len(output_ids) - output_ids[::-1].index(151668)
+                    except ValueError:
+                        index = 0
+                        
+                    thinking = tokenizer.decode(output_ids[:index], skip_special_tokens=True).strip("\n")
+                    final_response = tokenizer.decode(output_ids[index:], skip_special_tokens=True).strip("\n")
 
                     function_calls = []
-                    
-                    # Add KB info to response if used
-                    if kb_used:
-                        kb_info = f"\n\n📚 *Referenced knowledge from: {', '.join(kb_used)}*"
-                        final_response += kb_info
             
             # 💾 Save to History
             if use_history:
@@ -1232,7 +1603,8 @@ class MyModel(AIxBlockMLBase):
                             "function_calls": len(function_calls),
                             "thinking": thinking[:100] + "..." if len(thinking) > 100 else thinking,
                             "kb_used": kb_used,
-                            "extraction_method": function_calls[0]["extraction_method"] if function_calls else "none"
+                            "extraction_method": function_calls[0]["extraction_method"] if function_calls else "none",
+                            "prompt_template_used": True
                         }
                     )
                     logger.info(f"💾 Saved to session {session_id}")
@@ -1252,7 +1624,8 @@ class MyModel(AIxBlockMLBase):
                     "tools_used": len(function_calls),
                     "kb_bases_used": kb_used,
                     "extraction_method": function_calls[0]["extraction_method"] if function_calls else "model_generation",
-                    "kb_context_chars": len(kb_context)
+                    "kb_context_chars": len(kb_context),
+                    "prompt_template_enhanced": True
                 }
             }
 
