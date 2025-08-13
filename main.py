@@ -4,12 +4,24 @@ from typing import Any, Dict, Optional, List, Union, AsyncIterator
 import requests
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request, Body, WebSocketDisconnect, BackgroundTasks
+from fastapi import (
+    FastAPI,
+    HTTPException,
+    Request,
+    Body,
+    WebSocketDisconnect,
+    BackgroundTasks,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, JSONResponse
 from mcp.server.sse import SseServerTransport
 from pydantic import BaseModel
-from services_manager import cancel_service, list_services, service_status, start_service
+from services_manager import (
+    cancel_service,
+    list_services,
+    service_status,
+    start_service,
+)
 from starlette.routing import Mount
 from model import MyModel, mcp
 from utils.chat_history import ChatHistoryManager
@@ -27,6 +39,8 @@ from utils_voice_agent import (
     ensure_portaudio_installed,
 )
 from starlette.websockets import WebSocket
+
+ensure_portaudio_installed()
 
 subprocess.run("venv/bin/python load_model.py", shell=True)
 
@@ -111,44 +125,65 @@ async def websocket_llm(websocket: WebSocket):
         print(f"❌ Error: {str(e)}")
         await websocket.close()
 
+
 @app.post("/init-voice-agent")
 async def start_voice_agent(
-    stt_model: str = Body(default='mourinhan8/stt', embed=True),
-    tts_model: str = Body(default='mourinhan8/tts', embed=True)
+    stt_config: Optional[Dict[str, Any]] = Body(None),
+    tts_config: Optional[Dict[str, Any]] = Body(None),
 ):
-    ensure_portaudio_installed()
     stt_id = await start_service(
         name="stt",
-        model=stt_model,
+        config=stt_config,
         health_url="https://127.0.0.1:1005/health-check",
         run_fn_blocking=run_stt_app_func,
         stop_fn=stop_stt_app,
     )
     tts_id = await start_service(
         name="tts",
-        model=tts_model,
+        config=tts_config,
         health_url="http://127.0.0.1:1006/health-check",
         run_fn_blocking=run_tts_app_func,
         stop_fn=stop_tts_app,
     )
-    return {"message": "starting", "services": {"stt": stt_id, "tts": tts_id}}
+    return {
+        "message": "starting",
+        "services": {
+            "stt": stt_id,
+            "tts": tts_id,
+            "socket": {
+                "port": 1005,
+                "protocol": "wss",
+                "endpoint": "/ws/audio",
+            },
+        },
+    }
+
 
 @app.get("/voice-agent/status")
 async def status_all():
     return await list_services()
 
+
 @app.get("/voice-agent/status/{service_id}")
 async def status_one(service_id: str):
     data = await service_status(service_id)
+    data["socket"] = {
+        "port": 1005,
+        "protocol": "wss",
+        "endpoint": "/ws/audio",
+    }
     return data
+
 
 class CancelReq(BaseModel):
     port: int | None = None
+
 
 @app.post("/voice-agent/cancel/{service_id}")
 async def cancel_one(service_id: str, body: CancelReq):
     data = await cancel_service(service_id, kill_by_port=body.port)
     return data
+
 
 @app.post("/mcp/register")
 async def register_mcp_server(
@@ -174,6 +209,7 @@ async def register_mcp_server(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.get("/mcp/tools")
 async def list_mcp_tools():
     """List all available MCP tools"""
@@ -182,6 +218,7 @@ async def list_mcp_tools():
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/template_list")
 async def get_prompt_template():
@@ -192,6 +229,7 @@ async def get_prompt_template():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.get("/template_get")
 async def get_prompt_template(template_name: str):
     """Get a prompt template"""
@@ -200,6 +238,7 @@ async def get_prompt_template(template_name: str):
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/template_delete")
 async def delete_prompt_template(template_name: str):
@@ -210,14 +249,27 @@ async def delete_prompt_template(template_name: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.post("/template_update")
-async def update_prompt_template(template_name: str = Body(...), template_text: str = Body(...), input_variables: List[str] = Body(...), description: str = Body(...)):
+async def update_prompt_template(
+    template_name: str = Body(...),
+    template_text: str = Body(...),
+    input_variables: List[str] = Body(...),
+    description: str = Body(...),
+):
     """Update a prompt template"""
     try:
-        result = model.action("template_update", template_name=template_name, template_text=template_text, input_variables=input_variables, description=description)
+        result = model.action(
+            "template_update",
+            template_name=template_name,
+            template_text=template_text,
+            input_variables=input_variables,
+            description=description,
+        )
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/mcp/tools")
 async def list_mcp_tools():

@@ -1,18 +1,18 @@
 from factory import build_asr_pipe
+from pathlib import Path
+import json
+import argparse
 
-config_sample = {
-  "plugin": "whisper_seq2seq",
-  "params": {
-    "model_id": "openai/whisper-large-v3",
-    "language": "en",
-    "low_cpu_mem_usage": True,
-    "use_safetensors": True,
-    "model_kwargs": {
-      "language": "en"
-    }
-  }
-}
+def load_config(path: str) -> dict:
+    p = Path(path).expanduser().resolve()
+    with p.open("r", encoding="utf-8") as f:
+        return json.load(f)
 
-build_asr_pipe(config_sample)
+parser = argparse.ArgumentParser()
+parser.add_argument("--config", default="config_default.json", help="Đường dẫn file JSON")
+args = parser.parse_args()
+config = load_config(args.config)
+
+build_asr_pipe(config)
 
 print("Model loaded!")

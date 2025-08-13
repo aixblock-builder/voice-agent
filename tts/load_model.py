@@ -1,18 +1,17 @@
-# config = {
-#     "engine_name": "coqui",
-#     "engine_kwargs": {
-#         "model_name": "tts_models/multilingual/multi-dataset/xtts_v2",
-#         "specific_model": "v2.0.2",
-#         "voices_path": "./speakers",
-#     }
-# }
+import argparse
+import json
+from pathlib import Path
 
-config = {
-    "engine_name": "kokoro",
-    "engine_kwargs": {
-        "voice": "af_heart",
-    }
-}
+
+def load_config(path: str) -> dict:
+    p = Path(path).expanduser().resolve()
+    with p.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--config", default="config_default.json", help="Đường dẫn file JSON")
+args = parser.parse_args()
+config = load_config(args.config)
 
 def load_model():
     from factory import TTSFactory

@@ -1,0 +1,6 @@
+{
+    "engine_name": "kokoro",
+    "engine_kwargs": {
+        "voice": "af_heart"
+    }
+}

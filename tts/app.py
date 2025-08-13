@@ -1,3 +1,5 @@
+import argparse
+from pathlib import Path
 import asyncio, json, re
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator, List
@@ -5,26 +7,19 @@ from typing import AsyncGenerator, List
 from fastapi import FastAPI, Query
 from fastapi.responses import FileResponse, StreamingResponse
 
-# pip install "realtimetts[kokoro]" fastapi uvicorn
 from factory import TTSFactory
 
-# kokoro config
-config = {
-    "engine_name": "kokoro",
-    "engine_kwargs": {
-        "voice": "af_heart",
-    }
-}
-# xtts config
-# config = {
-#     "engine_name": "coqui",
-#     "engine_kwargs": {
-#         "model_name": "tts_models/multilingual/multi-dataset/xtts_v2",
-#         "specific_model": "v2.0.2",
-#         "voices_path": "./speakers",
-#     }
-# }
-# plugin = TTSFactory.create("coqui", **config["engine_kwargs"])
+
+def load_config(path: str) -> dict:
+    p = Path(path).expanduser().resolve()
+    with p.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--config", default="config_default.json", help="Đường dẫn file JSON")
+args = parser.parse_args()
+config = load_config(args.config)
+
 engine = None
 TextToAudioStream = None
     

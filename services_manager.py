@@ -1,6 +1,6 @@
 # voice_agent_manager.py
 import asyncio, time, contextlib
-from typing import Optional, Callable
+from typing import Optional, Callable, Dict, Any
 from urllib.parse import urlparse
 from uuid import uuid4
 import httpx
@@ -10,14 +10,14 @@ import psutil
 # ===== Registry =====
 class ServiceEntry:
     __slots__ = (
-        "id", "name", "model", "health_url",
+        "id", "name", "config", "health_url",
         "state", "error", "started_at", "ready_at",
         "server_task", "monitor_task", "stop_fn",
     )
-    def __init__(self, name: str, model: str, health_url: str, stop_fn: Optional[Callable]=None):
+    def __init__(self, name: str, config: Optional[Dict[str, Any]], health_url: str, stop_fn: Optional[Callable]=None):
         self.id = f"{name}-{uuid4().hex[:8]}"
         self.name = name
-        self.model = model
+        self.config = config
         self.health_url = health_url
         self.state = "starting"        # starting | ready | timeout | failed | stopped | cancelled
         self.error: Optional[str] = None
@@ -32,16 +32,16 @@ services: dict[str, ServiceEntry] = {}
 # ===== Public APIs bạn sẽ gọi từ FastAPI =====
 async def start_service(
     name: str,
-    model: str,
+    config: Optional[Dict[str, Any]],
     run_fn_blocking,              # ví dụ run_stt_app_func (sync & blocking)
     health_url: str = None,
     stop_fn: Optional[Callable] = None,  # ví dụ stop_stt_app (tuỳ chọn)
 ) -> str:
-    entry = ServiceEntry(name, model, health_url, stop_fn)
+    entry = ServiceEntry(name, config, health_url, stop_fn)
     services[entry.id] = entry
 
     # chạy hàm blocking ở thread → không khoá event loop
-    entry.server_task = asyncio.create_task(asyncio.to_thread(run_fn_blocking, model))
+    entry.server_task = asyncio.create_task(asyncio.to_thread(run_fn_blocking, config))
     return entry.id
 
 async def service_status(service_id: str, health_timeout: float = 30.0) -> dict:

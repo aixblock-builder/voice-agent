@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import threading
@@ -5,6 +6,7 @@ import shutil
 import queue
 import time
 import contextlib
+from typing import Optional
 
 stt_proc = None
 tts_proc = None
@@ -35,13 +37,12 @@ def ensure_portaudio_installed():
         subprocess.run(cmd, check=True, env=env)
 
 
-def setup_app(repo: str, folder: str):
-    # 1. Clone repo
-    if not os.path.exists(folder):
-        subprocess.run(
-            f"git clone https://github.com/{repo} {folder}", shell=True, check=True
-        )
-
+def setup_app(folder: str, config: Optional[dict] = None):
+    cfg_path = os.path.join(folder, "config.json")
+    if config is not None:
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, ensure_ascii=False, indent=2)
+        print(f"[setup_app] Saved config to {cfg_path}")
     # 2. Tạo venv nếu chưa có
     venv_path = os.path.join(folder, "venv")
     if not os.path.exists(venv_path):
@@ -67,7 +68,7 @@ def setup_app(repo: str, folder: str):
 def load_model(folder):
     load_model_file = os.path.join(folder, "load_model.py")
     if os.path.exists(load_model_file):
-        cmd = f"cd {folder} && venv/bin/python load_model.py"
+        cmd = f"cd {folder} && venv/bin/python load_model.py --config config.json"
         subprocess.run(
             cmd,
             shell=True,
@@ -78,7 +79,7 @@ def load_model(folder):
 
 
 def run_app(folder: str):
-    cmd = f"cd {folder} && venv/bin/python app.py"
+    cmd = f"cd {folder} && venv/bin/python app.py --config config.json"
     return subprocess.Popen(
         cmd,
         shell=True,
@@ -97,8 +98,8 @@ def stream_output(pipe, q):
         pipe.close()
 
 
-def run_stt_app_func(model):
-    setup_app(model, stt_folder)
+def run_stt_app_func(config: Optional[dict] = None):
+    setup_app(stt_folder, config)
     global stt_proc
     q = queue.Queue()
     try:
@@ -128,8 +129,8 @@ def run_stt_app_func(model):
             print(f"Process returned with code: {stt_proc.returncode}")
 
 
-def run_tts_app_func(model):
-    setup_app(model, tts_folder)
+def run_tts_app_func(config: Optional[dict] = None):
+    setup_app(tts_folder, config)
     global tts_proc
     q = queue.Queue()
     try:

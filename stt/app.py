@@ -1,6 +1,9 @@
 # server.py
+import argparse
 import asyncio
 from contextlib import asynccontextmanager
+import json
+from pathlib import Path
 # import json
 from audio_processor import AudioProcessor
 from factory import build_asr_pipe
@@ -48,20 +51,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-config_sample = {
-  "plugin": "whisper_seq2seq",
-  "params": {
-    "model_id": "openai/whisper-large-v3",
-    "language": "en",
-    "low_cpu_mem_usage": True,
-    "use_safetensors": True,
-    "model_kwargs": {
-      "language": "en"
-    }
-  }
-}
+def load_config(path: str) -> dict:
+    p = Path(path).expanduser().resolve()
+    with p.open("r", encoding="utf-8") as f:
+        return json.load(f)
 
-asr_pipe = build_asr_pipe(config_sample)
+parser = argparse.ArgumentParser()
+parser.add_argument("--config", default="config_default.json", help="Đường dẫn file JSON")
+args = parser.parse_args()
+config = load_config(args.config)
+asr_pipe = build_asr_pipe(config)
 
 audio_processor = AudioProcessor(pipe=asr_pipe)
 
