@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="vi">
+
+<head>
+    <meta charset="UTF-8">
+    <title>WebSocket TTS Client (Dynamic)</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            padding: 20px;
+            max-width: 800px;
+            margin: auto;
+        }
+
+        #controls,
+        #connection-controls {
+            margin-top: 15px;
+            margin-bottom: 15px;
+        }
+
+        #textInput {
+            width: 400px;
+            padding: 5px;
+        }
+
+        button {
+            padding: 5px 10px;
+            cursor: pointer;
+        }
+
+        #logs,
+        #result {
+            white-space: pre-wrap;
+            background-color: #f4f4f4;
+            border: 1px solid #ccc;
+            padding: 10px;
+            margin-top: 10px;
+            min-height: 100px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>WebSocket TTS Client (Động)</h1>
+
+    <div id="connection-controls">
+        <button id="connectBtn">Kết nối</button>
+        <button id="disconnectBtn" disabled>Ngắt kết nối</button>
+    </div>
+
+    <div id="controls">
+        <input type="text" id="textInput" placeholder="Nhập văn bản cần nói..." disabled>
+        <button id="sendBtn" disabled>Gửi</button>
+    </div>
+
+    <h3>Trạng thái phát:</h3>
+    <div id="logs"></div>
+
+    <h3>Nội dung hội thoại:</h3>
+    <div id="result"></div>
+
+    <script>
+        const connectBtn = document.getElementById('connectBtn');
+        const disconnectBtn = document.getElementById('disconnectBtn');
+        const textInput = document.getElementById('textInput');
+        const sendBtn = document.getElementById('sendBtn');
+        const logsDiv = document.getElementById('logs');
+        const resultDiv = document.getElementById('result');
+
+        let ws; // Biến để giữ kết nối WebSocket, được duy trì xuyên suốt
+        let audioQueue = [];
+        let isPlaying = false;
+
+        // --- QUẢN LÝ KẾT NỐI VÀ UI ---
+
+        function connect() {
+            // Chỉ kết nối nếu chưa có kết nối nào
+            if (ws && ws.readyState !== WebSocket.CLOSED) {
+                log("Đã kết nối rồi.");
+                return;
+            }
+
+            ws = new WebSocket("/ws/audio_v2_test");
+
+            ws.onopen = function (event) {
+                log("Kết nối thành công. Sẵn sàng nhận văn bản.");
+                updateUI(true);
+            };
+
+            ws.onmessage = function (event) {
+                const data = JSON.parse(event.data);
+
+                if (data.error) {
+                    log(`Lỗi từ Server: ${data.error}`);
+                    return;
+                }
+
+                if (data.type === "transcript") {
+                    log(data.transcript)
+
+                }
+
+                if (data.type === "audio") {
+                    handleAudioData(data.audio, data.text, data.text_index, data.is_last);
+                }
+            };
+
+            ws.onclose = function (event) {
+                log("Kết nối đã đóng.");
+                updateUI(false);
+            };
+
+            ws.onerror = function (event) {
+                log("Lỗi WebSocket.");
+                console.error("WebSocket Error:", event);
+                updateUI(false);
+            };
+        }
+
+        function disconnect() {
+            if (ws) {
+                ws.close();
+            }
+        }
+
+        function sendMessage() {
+            const text = textInput.value;
+            if (!text.trim()) {
+                alert("Vui lòng nhập văn bản.");
+                return;
+            }
+
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                log(`Đang gửi: "${text}"`);
+                const requestData = {
+                    text: text,
+                    speaker_wav: "example_female.wav",
+                    language: "en"
+                };
+                ws.send(JSON.stringify(requestData));
+                resultDiv.textContent += `User: ${text}\n`;
+                textInput.value = ""; // Xóa input sau khi gửi
+            } else {
+                alert("Chưa kết nối. Vui lòng nhấn nút 'Kết nối'.");
+            }
+        }
+
+        function updateUI(isConnected) {
+            connectBtn.disabled = isConnected;
+            disconnectBtn.disabled = !isConnected;
+            textInput.disabled = !isConnected;
+            sendBtn.disabled = !isConnected;
+        }
+
+        // Gán sự kiện cho các nút
+        connectBtn.addEventListener('click', connect);
+        disconnectBtn.addEventListener('click', disconnect);
+        sendBtn.addEventListener('click', sendMessage);
+        textInput.addEventListener('keyup', (event) => {
+            if (event.key === 'Enter') {
+                sendMessage();
+            }
+        });
+
+        // --- CÁC HÀM XỬ LÝ ÂM THANH (Giữ nguyên) ---
+
+        function log(message) {
+            logsDiv.innerHTML += `<p>${new Date().toLocaleTimeString()}: ${message}</p>`;
+            logsDiv.scrollTop = logsDiv.scrollHeight;
+        }
+
+        function handleAudioData(byteArray, sentence, index, isLast) {
+            log(`Đã nhận câu ${index}: "${sentence}"`);
+            const pcmData = new Uint8Array(byteArray);
+            const wavBuffer = addWavHeader(pcmData, 22050, 1);
+            const blob = new Blob([wavBuffer], { type: "audio/wav" });
+            audioQueue.push({ blob, sentence });
+            if (!isPlaying) playNextAudio();
+        }
+
+        function playNextAudio() {
+            if (isPlaying || audioQueue.length === 0) {
+                log("Kết thúc.");    
+                return
+            };
+            isPlaying = true;
+            const { blob, sentence } = audioQueue.shift();
+            const url = URL.createObjectURL(blob);
+            const audio = new Audio(url);
+            resultDiv.textContent += `Assistant: ${sentence} `;
+            log(`Đang phát: "${sentence}"`);
+            audio.onended = () => {
+                URL.revokeObjectURL(url);
+                isPlaying = false;
+                playNextAudio();
+            };
+            audio.onerror = (e) => {
+                console.error("Lỗi audio:", e);
+                URL.revokeObjectURL(url);
+                isPlaying = false;
+                playNextAudio();
+            };
+            audio.play().catch(console.error);
+        }
+
+        function addWavHeader(pcmData, sampleRate = 22050, channels = 1) {
+            const buffer = new ArrayBuffer(44 + pcmData.length);
+            const view = new DataView(buffer);
+            const writeString = (offset, str) => {
+                for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+            };
+            writeString(0, "RIFF");
+            view.setUint32(4, 36 + pcmData.length, true);
+            writeString(8, "WAVE");
+            writeString(12, "fmt ");
+            view.setUint32(16, 16, true);
+            view.setUint16(20, 1, true);
+            view.setUint16(22, channels, true);
+            view.setUint32(24, sampleRate, true);
+            view.setUint32(28, sampleRate * channels * 2, true);
+            view.setUint16(32, channels * 2, true);
+            view.setUint16(34, 16, true);
+            writeString(36, "data");
+            view.setUint32(40, pcmData.length, true);
+            new Uint8Array(buffer, 44).set(pcmData);
+            return buffer;
+        }
+    </script>
+</body>
+
+</html>

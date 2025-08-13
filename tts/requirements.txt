@@ -1,0 +1,3 @@
+fastapi
+realtimetts[all]
+uvicorn

@@ -1,0 +1,103 @@
+# accelerate==1.3.0
+# aixblock_ml==0.1.8
+# aixblock_sdk==0.0.5
+# datasets==3.2.0
+# Flask==3.1.0
+# flask_cors==5.0.0
+# gradio==5.16.0
+# grafana_api==1.0.3
+# huggingface_hub==0.28.1
+# langchain==0.3.18
+# langchain_huggingface==0.1.2
+# numpy==1.26.4
+# pandas==2.2.3
+# prometheus_client==0.21.1
+# transformers==4.48.3
+# trl==0.11.4
+# gunicorn==23.0.0
+
+
+# # old requirements.txt
+transformers
+huggingface_hub
+# ==4.46.1
+# accelerate==0.28.0
+accelerate>=0.31.0
+prometheus-client
+aixblock-ml
+aixblock-sdk==0.0.5
+aixblock-tools
+tensorboardX
+# ==1.9
+gradio #==3.50
+redis
+rq
+flask>=2.2
+flask-cors
+Werkzeug>=2.0
+gunicorn>=20.0
+colorama
+lxml
+appdirs
+gitpython
+centrifuge-python
+opencv-python>=4.1.1
+numpy
+grafana-api
+diffusers
+# ==0.30.3
+# langchain==0.3.7
+# langchain_community==0.3.7
+datasets
+# ==2.18.0
+trl
+peft
+scipy
+
+# torch==2.3.0
+# torch==2.4.0+cu124
+# torchaudio==2.4.0+cu124
+# flash-attn==2.6.3
+# torch==2.3.0 
+# flash_attn==2.5.8
+# flash_attn
+# ==2.7.3
+bitsandbytes>=0.41.3
+langchain
+langchain_community
+# en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-2.3.1/en_core_web_sm-2.3.1.tar.gz
+# tiktoken
+# accelerate>=0.27.0
+nvidia-ml-py
+wandb
+langchain_huggingface
+flask_swagger_ui
+pyyaml
+gradio_log
+tf-keras
+loguru
+about-time
+rich
+# nvidia-nccl-cu12
+# vllm
+# auto-round
+# # intel_extension_for_pytorch==2.5.0
+huggingface_hub[hf_xet]
+apscheduler
+fastapi
+uvicorn
+mcp
+# torch==2.6.0 --index-url https://download.pytorch.org/whl/cu126
+# torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu126
+# torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu126
+torch==2.6.0
+torchvision==0.21.0
+torchaudio==2.6.0
+spaces
+webrtcvad
+google-generativeai
+librosa
+silero_vad
+websockets
+httpx
+fastapi-proxy-lib[standard]

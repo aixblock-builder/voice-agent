@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <title>TTS Stream Player</title>
+</head>
+
+<body>
+    <h1>Text-to-Speech Stream</h1>
+    <textarea id="text-input" rows="4" cols="50">Hello world. How are you?</textarea><br />
+    <button onclick="startStreaming()">Send & Play</button>
+
+    <h3>Đang phát:</h3>
+    <p id="current-text"></p>
+
+    <script>
+        const audioQueue = [];
+        let isPlaying = false;
+        let unlocked = false;
+
+        async function startStreaming() {
+            if (!unlocked) {
+                // unlock bằng phát âm trống
+                const context = new AudioContext();
+                const source = context.createBufferSource();
+                source.buffer = context.createBuffer(1, 1, 22050);
+                source.connect(context.destination);
+                source.start(0);
+                unlocked = true;
+            }
+            const text = document.getElementById("text-input").value;
+            const url = `/tts-only?text=${encodeURIComponent(text)}`;
+
+            const response = await fetch(url);
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = "";
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+
+                const lines = buffer.split("\n");
+                buffer = lines.pop(); // last partial line stays in buffer
+
+                for (const line of lines) {
+                    if (line.trim()) {
+                        const data = JSON.parse(line);
+                        handleAudioData(data.audio, data.text[0], data.text_index, data.is_last);
+                    }
+                }
+            }
+        }
+
+        function handleAudioData(byteArray, sentence, index, isLast) {
+            const pcmData = new Uint8Array(byteArray);
+            const wavBuffer = addWavHeader(pcmData, 22050, 1);
+            const blob = new Blob([wavBuffer], { type: "audio/wav" });
+            audioQueue.push({ blob, sentence });
+
+            if (audioQueue.length === 1) {
+                playNextAudio();
+            }
+        }
+
+        function playNextAudio() {
+            if (isPlaying || audioQueue.length === 0) return;
+
+            isPlaying = true;
+
+            const { blob, sentence } = audioQueue.shift();
+            const url = URL.createObjectURL(blob);
+            const audio = new Audio(url);
+
+            // 👉 Cập nhật giao diện tại đây
+            document.getElementById("current-text").innerText += sentence + "\n";
+
+            audio.onended = () => {
+                URL.revokeObjectURL(url);
+                isPlaying = false;
+                playNextAudio();
+            };
+
+            audio.onerror = (e) => {
+                console.error("Audio error:", e);
+                isPlaying = false;
+                playNextAudio();
+            };
+
+            audio.play().catch((err) => {
+                console.error("Play error:", err);
+                isPlaying = false;
+            });
+        }
+
+
+
+        function addWavHeader(pcmData, sampleRate = 22050, channels = 1) {
+            const byteRate = sampleRate * channels * 2;
+            const blockAlign = channels * 2;
+            const buffer = new ArrayBuffer(44 + pcmData.length);
+            const view = new DataView(buffer);
+
+            writeStr(view, 0, "RIFF");
+            view.setUint32(4, 36 + pcmData.length, true);
+            writeStr(view, 8, "WAVE");
+            writeStr(view, 12, "fmt ");
+            view.setUint32(16, 16, true); // PCM
+            view.setUint16(20, 1, true);
+            view.setUint16(22, channels, true);
+            view.setUint32(24, sampleRate, true);
+            view.setUint32(28, byteRate, true);
+            view.setUint16(32, blockAlign, true);
+            view.setUint16(34, 16, true); // bits per sample
+            writeStr(view, 36, "data");
+            view.setUint32(40, pcmData.length, true);
+            new Uint8Array(buffer, 44).set(pcmData);
+            return buffer;
+        }
+
+        function writeStr(view, offset, str) {
+            for (let i = 0; i < str.length; i++) {
+                view.setUint8(offset + i, str.charCodeAt(i));
+            }
+        }
+    </script>
+</body>
+
+</html>
