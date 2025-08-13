@@ -174,6 +174,50 @@ async def register_mcp_server(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/mcp/tools")
+async def list_mcp_tools():
+    """List all available MCP tools"""
+    try:
+        result = model.action("mcp_list_tools")
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/template_list")
+async def get_prompt_template():
+    """Get all prompt templates"""
+    try:
+        result = model.action("template_list")
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/template_get")
+async def get_prompt_template(template_name: str):
+    """Get a prompt template"""
+    try:
+        result = model.action("template_get", template_name=template_name)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/template_delete")
+async def delete_prompt_template(template_name: str):
+    """Delete a prompt template"""
+    try:
+        result = model.action("template_delete", template_name=template_name)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/template_update")
+async def update_prompt_template(template_name: str = Body(...), template_text: str = Body(...), input_variables: List[str] = Body(...), description: str = Body(...)):
+    """Update a prompt template"""
+    try:
+        result = model.action("template_update", template_name=template_name, template_text=template_text, input_variables=input_variables, description=description)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/mcp/tools")
 async def list_mcp_tools():
