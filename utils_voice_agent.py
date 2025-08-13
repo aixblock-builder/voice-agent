@@ -97,38 +97,6 @@ def stream_output(pipe, q):
     finally:
         pipe.close()
 
-
-def run_stt_app_func(config: Optional[dict] = None):
-    setup_app(stt_folder, config)
-    global stt_proc
-    q = queue.Queue()
-    try:
-        stt_proc = run_app(stt_folder)
-        # Tạo thread để đọc stdout và stderr song song
-        stdout_thread = threading.Thread(target=stream_output, args=(stt_proc.stdout, q))
-        stderr_thread = threading.Thread(target=stream_output, args=(stt_proc.stderr, q))
-        stdout_thread.start()
-        stderr_thread.start()
-        while True:
-            try:
-                line = q.get(timeout=0.1)
-                print(line, end='')
-            except queue.Empty:
-                if stt_proc.poll() is not None and q.empty():
-                    break
-        ret = stt_proc.wait()
-        stdout_thread.join()
-        stderr_thread.join()
-        print(f"Process exited with code {ret}")
-    except Exception as e:
-        print("Runner error:", e)
-        if stt_proc and stt_proc.poll() is None:
-            stt_proc.terminate()
-            stt_proc.wait(timeout=5)
-        if stt_proc:
-            print(f"Process returned with code: {stt_proc.returncode}")
-
-
 def run_tts_app_func(config: Optional[dict] = None):
     setup_app(tts_folder, config)
     global tts_proc
@@ -159,16 +127,6 @@ def run_tts_app_func(config: Optional[dict] = None):
             tts_proc.wait(timeout=5)
         if tts_proc:
             print(f"Process returned with code: {tts_proc.returncode}")
-
-# STT
-def stop_stt_app():
-    with contextlib.suppress(Exception):
-        if stt_proc and stt_proc.poll() is None:
-            stt_proc.terminate()
-            try:
-                stt_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                stt_proc.kill()
 
 # TTS (tương tự nếu bạn có tts_proc)
 def stop_tts_app():

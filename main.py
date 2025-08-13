@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import asynccontextmanager, suppress
 import os
 from typing import Any, Dict, Optional, List, Union, AsyncIterator
 import requests
@@ -26,22 +27,25 @@ from starlette.routing import Mount
 from model import MyModel, mcp
 from speech_to_text.plugin_loader import *
 from speech_to_text.asr_base import create_plugin
+from stt.app import CHUNK_SIZE_BYTES, MAX_RECORDING_FRAMES, SILENCE_FRAMES_THRESHOLD, VAD_SPEECH_THRESHOLD
+from stt.llm_client import get_audio_from_tts_service
 from utils.chat_history import ChatHistoryManager
+from utils.socket_manager import ConnectionManager
 import json
 from starlette.websockets import WebSocket
 import subprocess
 import atexit
 import base64
+from utils.vad_utils import BYTES_PER_SAMPLE, FRAME_SIZE, process_frame
 from utils_voice_agent import (
-    run_stt_app_func,
     run_tts_app_func,
-    stop_stt_app,
     stop_tts_app,
     tts_proc,
     stt_proc,
     ensure_portaudio_installed,
 )
 from starlette.websockets import WebSocket
+import torch
 
 ensure_portaudio_installed()
 
@@ -65,6 +69,7 @@ app.add_middleware(
 model = MyModel()
 chat_history = ChatHistoryManager(persist_directory="./chroma_db_history")
 
+
 class ActionRequest(BaseModel):
     command: str
     params: Dict[str, Any]
@@ -72,14 +77,17 @@ class ActionRequest(BaseModel):
     session_id: Optional[str] = None
     use_history: Optional[bool] = True
 
+
 active_plugins: Dict[str, Any] = {}
 websocket_connections: Dict[str, WebSocket] = {}
 agent_connections: Dict[str, Dict[str, Any]] = {}
 
+
 class ASRConfig(BaseModel):
     plugin_type: str  # "whisper", "huggingface", etc
     config_model: Dict[str, Any]  # model-specific config
-    
+
+
 class InitAgentRequest(BaseModel):
     name: str
     agent_name: str
@@ -90,6 +98,7 @@ class InitAgentRequest(BaseModel):
     storageConnection: Optional[Dict[str, Any]] = None
     asr_config: Optional[ASRConfig] = None
 
+
 class ConversationState:
     def __init__(self, agent_name: str):
         self.agent_name = agent_name
@@ -98,17 +107,18 @@ class ConversationState:
         self.is_processing = False
         self.conversation_id = f"conv_{agent_name}_{asyncio.get_event_loop().time()}"
 
+
 @app.websocket("/conversation")
 async def websocket_conversation_endpoint(websocket: WebSocket):
     await websocket.accept()
-    
+
     conversation_state = None
-    
+
     try:
         async for message in websocket.iter_text():
             data = json.loads(message)
             message_type = data.get("type")
-            
+
             if message_type == "conversation_initiation_client_data":
                 conversation_state = await handle_init_conversation(websocket, data)
             elif message_type == "user_audio_chunk":
@@ -116,68 +126,142 @@ async def websocket_conversation_endpoint(websocket: WebSocket):
                     await handle_audio_chunk(websocket, data, conversation_state)
             elif message_type == "pong":
                 await handle_pong(data)
-                
+
     except WebSocketDisconnect:
         print(f"[Agent] Client disconnected")
     except Exception as e:
         print(f"[Agent] Error: {e}")
         await websocket.close()
 
+manager = ConnectionManager()
 
-@app.post("/init-voice-agent")
-async def start_voice_agent(
-    stt_config: Optional[Dict[str, Any]] = Body(None),
-    tts_config: Optional[Dict[str, Any]] = Body(None),
-):
-    stt_id = await start_service(
-        name="stt",
-        config=stt_config,
-        health_url="https://127.0.0.1:1005/health-check",
-        run_fn_blocking=run_stt_app_func,
-        stop_fn=stop_stt_app,
-    )
-    tts_id = await start_service(
-        name="tts",
-        config=tts_config,
-        health_url="http://127.0.0.1:1006/health-check",
-        run_fn_blocking=run_tts_app_func,
-        stop_fn=stop_tts_app,
-    )
-    return {
-        "message": "starting",
-        "services": {
-            "stt": stt_id,
-            "tts": tts_id,
-            "socket": {
-                "port": 1005,
-                "protocol": "wss",
-                "endpoint": "/ws/audio",
-            },
-        },
-    }
+@app.websocket("/ws/audio_stream")
+async def websocket_endpoint(websocket: WebSocket):
+    client_id = await manager.connect(websocket)
+    audio_buffer = bytearray()
+    recording_buffer = []
+    is_recording = False
+    silence_counter = 0
+    conversation_state = await handle_init_conversation(websocket, {})
+
+    try:
+        while True:
+            try:
+                data = await websocket.receive_bytes()
+                audio_buffer.extend(data)
+
+                if len(audio_buffer) < CHUNK_SIZE_BYTES:
+                    continue
+
+                chunk_bytes = audio_buffer[:CHUNK_SIZE_BYTES]
+                del audio_buffer[:CHUNK_SIZE_BYTES]
+
+                frames = []
+                speech_frame_count = 0
+                frame_byte_size = FRAME_SIZE * BYTES_PER_SAMPLE
+                for i in range(0, len(chunk_bytes), frame_byte_size):
+                    frame_data = chunk_bytes[i:i + frame_byte_size]
+                    if len(frame_data) < frame_byte_size:
+                        continue # Bỏ qua frame cuối nếu không đủ byte
+
+                    # Gọi hàm xử lý mới, thuần túy
+                    is_speech, waveform = process_frame(frame_data)
+                    
+                    if waveform is not None:
+                        frames.append(waveform)
+                        if is_speech:
+                            speech_frame_count += 1
+                
+                if not frames:
+                    continue
+
+                speech_probability = speech_frame_count / len(frames)
+
+                if is_recording:
+                    recording_buffer.extend(frames)
+                    if speech_probability > VAD_SPEECH_THRESHOLD:
+                        silence_counter = 0
+                    else:
+                        silence_counter += len(frames)
+
+                    if silence_counter > SILENCE_FRAMES_THRESHOLD or len(recording_buffer) > MAX_RECORDING_FRAMES:
+                        print(f"[*] Dừng ghi âm. Tổng số khung: {len(recording_buffer)}")
+                        final_waveform = torch.cat(recording_buffer, dim=1)
+                        int16_tensor = (final_waveform.squeeze() * 32767).to(torch.int16)
+                        audio_bytes = int16_tensor.cpu().numpy().tobytes()
+                        transcript = await speech_to_text_with_plugin(audio_bytes, conversation_state.agent_name)
+                        print(transcript)
+                        if transcript:
+                            if manager.cancel_pipeline(client_id):
+                                await manager.send_json_to_client({"type": "control", "event": "interrupt"}, client_id)                            
+                            await manager.send_json_to_client({ 
+                                "type": "transcript", 
+                                "transcript": transcript
+                            }, client_id)
+                            ai_response = await generate_ai_response(transcript, conversation_state.agent_name)
+                            if ai_response:
+                                task = asyncio.create_task(llm_tts_pipeline(client_id, ai_response, manager, conversation_state.agent_name))
+                                manager.set_pipeline_task(client_id, task)
+
+                        is_recording = False
+                        recording_buffer.clear()
+                        silence_counter = 0
+                
+                elif speech_probability > VAD_SPEECH_THRESHOLD:
+                    print("[*] Bắt đầu ghi âm...")
+                    is_recording = True
+                    recording_buffer.extend(frames)
+                    silence_counter = 0
+
+            except Exception as e:
+                raise e
+    except WebSocketDisconnect:
+        print("Client disconnected")
+        await manager.disconnect(client_id)
+    except Exception as e:
+        print(f"WebSocket error: {e}")
+        await manager.disconnect(client_id)
+    finally:
+        print(f"Closing connection for client {client_id}.")
+        await manager.disconnect(client_id)
+
+async def llm_tts_pipeline(client_id, transcript, manager, agent_name):
+    tts_task = None
+    try:
+        ai_response = await generate_ai_response(transcript, agent_name)
+        tts_task = asyncio.create_task(get_audio_from_tts_service(client_id, ai_response, manager))
+        await tts_task
+    except Exception as e:
+        print(f"Error in TTS pipeline: {e}")
+        if tts_task:
+            tts_task.cancel()
+        return None
+    except asyncio.CancelledError:
+            # Task bị huỷ khi user gửi prompt mới → im lặng thoát
+            print(f"[PIPE] Pipeline client {client_id} bị huỷ (prompt mới).")
+            if tts_task is not None:
+                tts_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await tts_task   # chờ cleanup đóng stream
+    except Exception as e:
+        print(f"[PIPE] Lỗi pipeline: {e}")
+        await manager.send_json_to_client({"error": "Internal pipeline error"}, client_id)
 
 
-@app.get("/voice-agent/status")
+@app.get("/tts/status")
 async def status_all():
     return await list_services()
 
 
-@app.get("/voice-agent/status/{service_id}")
+@app.get("/tts/status/{service_id}")
 async def status_one(service_id: str):
     data = await service_status(service_id)
-    data["socket"] = {
-        "port": 1005,
-        "protocol": "wss",
-        "endpoint": "/ws/audio",
-    }
     return data
-
-
 class CancelReq(BaseModel):
     port: int | None = None
 
 
-@app.post("/voice-agent/cancel/{service_id}")
+@app.post("/tts/cancel/{service_id}")
 async def cancel_one(service_id: str, body: CancelReq):
     data = await cancel_service(service_id, kill_by_port=body.port)
     return data
@@ -193,138 +277,165 @@ async def register_mcp_server(
     storageConnection: Dict[str, Any] = Body(None),
 ):
     """Register a remote MCP server"""
-async def handle_init_conversation(websocket: WebSocket, data: Dict[str, Any]) -> ConversationState:
+
+
+async def handle_init_conversation(
+    websocket: WebSocket, data: Dict[str, Any]
+) -> ConversationState:
     """Handle conversation initialization"""
     try:
         # Extract config
         config = data.get("conversation_config_override", {})
         agent_name = data.get("agent_name", "default_agent")
         agent_config = config.get("agent", {})
-        prompt = agent_config.get("prompt", {}).get("prompt", "You are a helpful assistant")
-        first_message = agent_config.get("first_message", "Hello! How can I help you today?")
-        
+        prompt = agent_config.get("prompt", {}).get(
+            "prompt", "You are a helpful assistant"
+        )
+        first_message = agent_config.get(
+            "first_message", "Hello! How can I help you today?"
+        )
+
         # Create conversation state
         conversation_state = ConversationState(agent_name)
-        
+
         # Send ready signal
-        await websocket.send_text(json.dumps({
-            "type": "conversation_initiation_metadata",
-            "conversation_id": conversation_state.conversation_id
-        }))
-        
+        await websocket.send_text(
+            json.dumps(
+                {
+                    "type": "conversation_initiation_metadata",
+                    "conversation_id": conversation_state.conversation_id,
+                }
+            )
+        )
+
         conversation_state.is_initialized = True
-        
+
         # Send first message if provided
         if first_message:
             # Generate TTS for first message
             first_audio = await text_to_speech(first_message)
-            
+
             if first_audio:
-                await websocket.send_text(json.dumps({
-                    "type": "audio",
-                    "audio_event": {
-                        "audio_base_64": first_audio
-                    }
-                }))
-            
+                await websocket.send_text(
+                    json.dumps(
+                        {"type": "audio", "audio_event": {"audio_base_64": first_audio}}
+                    )
+                )
+
             # Send agent response text
-            await websocket.send_text(json.dumps({
-                "type": "agent_response",
-                "agent_response_event": {
-                    "agent_response": first_message
-                }
-            }))
-        
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "agent_response",
+                        "agent_response_event": {"agent_response": first_message},
+                    }
+                )
+            )
+
         return conversation_state
-        
+
     except Exception as e:
         print(f"[Agent] Init error: {e}")
         raise
 
-async def handle_audio_chunk(websocket: WebSocket, data: Dict[str, Any], state: ConversationState):
+
+async def handle_audio_chunk(
+    websocket: WebSocket, data: Dict[str, Any], state: ConversationState
+):
     """Handle incoming audio chunk"""
     if not state.is_initialized or state.is_processing:
         # Buffer audio if not ready
         state.audio_buffer.append(data.get("user_audio_chunk"))
         return
-    
+
     state.is_processing = True
-    
+
     try:
         # Get audio data
         audio_base64 = data.get("user_audio_chunk")
         if not audio_base64:
             return
-            
+
         # Decode audio
         audio_data = base64.b64decode(audio_base64)
-        
+
         # Speech to Text using active plugin
         transcript = await speech_to_text_with_plugin(audio_data, state.agent_name)
-        
+
         if transcript:
             # Send user transcript
-            await websocket.send_text(json.dumps({
-                "type": "user_transcript", 
-                "user_transcription_event": {
-                    "user_transcript": transcript
-                }
-            }))
-            
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "user_transcript",
+                        "user_transcription_event": {"user_transcript": transcript},
+                    }
+                )
+            )
+
             # Generate AI response
             ai_response = await generate_ai_response(transcript, state.agent_name)
-            
+
             # Send agent response text
-            await websocket.send_text(json.dumps({
-                "type": "agent_response",
-                "agent_response_event": {
-                    "agent_response": ai_response
-                }
-            }))
-            
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "agent_response",
+                        "agent_response_event": {"agent_response": ai_response},
+                    }
+                )
+            )
+
             # Generate and send audio response
             audio_response = await text_to_speech(ai_response)
             if audio_response:
-                await websocket.send_text(json.dumps({
-                    "type": "audio",
-                    "audio_event": {
-                        "audio_base_64": audio_response
-                    }
-                }))
-        
+                await websocket.send_text(
+                    json.dumps(
+                        {
+                            "type": "audio",
+                            "audio_event": {"audio_base_64": audio_response},
+                        }
+                    )
+                )
+
     except Exception as e:
         print(f"[Agent] Audio processing error: {e}")
     finally:
         state.is_processing = False
+
 
 async def handle_pong(data: Dict[str, Any]):
     """Handle pong message"""
     event_id = data.get("event_id")
     print(f"[Agent] Received pong for event: {event_id}")
 
-async def speech_to_text_with_plugin(audio_data: bytes, agent_name: str) -> Optional[str]:
+
+async def speech_to_text_with_plugin(
+    audio_data: bytes, agent_name: str
+) -> Optional[str]:
     """Convert speech to text using active ASR plugin"""
     try:
         # Get ASR plugin for this agent
         asr_plugin = active_plugins.get(agent_name, active_plugins.get(agent_name))
-        
+
         if not asr_plugin:
             print(f"[STT] No ASR plugin found for agent: {agent_name}")
             return None
-        
+
         # Convert audio data to format expected by plugin
         # audio_file = convert_audio_to_wav(audio_data)
-        
+
         # Run STT
         result = await asyncio.to_thread(asr_plugin.predict, audio_data)
-        
+
         if isinstance(result, dict):
-            return result.get('text', '')
+            return result.get("text", "")
         return str(result) if result else None
-        
+
     except Exception as e:
         print(f"[STT] Error: {e}")
         return None
+
 
 async def generate_ai_response(text: str, agent_name: str) -> str:
     """Generate AI response using model"""
@@ -337,45 +448,48 @@ async def generate_ai_response(text: str, agent_name: str) -> str:
                 "enable_function_calling": True,
             },
             session_id=agent_name,
-            use_history=True
+            use_history=True,
         )
-        
+
         response = model.action(
             action_request.command,
             **action_request.params,
             session_id=action_request.session_id,
-            use_history=action_request.use_history
+            use_history=action_request.use_history,
         )
-        
+
         # Extract text from response
         if isinstance(response, dict):
             return response.get("response", "I'm sorry, I couldn't process that.")
         return str(response) if response else "I'm sorry, I couldn't process that."
-        
+
     except Exception as e:
         print(f"[AI] Response generation error: {e}")
         return "I'm sorry, there was an error processing your request."
 
+
 async def text_to_speech(text: str) -> Optional[str]:
     """Convert text to speech and return base64 audio"""
     return None
+
 
 def convert_audio_to_wav(audio_data: bytes) -> str:
     """Convert audio data to WAV file for ASR plugin"""
     try:
         # Create temporary WAV file
         temp_file = f"/tmp/audio_{asyncio.get_event_loop().time()}.wav"
-        
+
         # Assume audio_data is already in WAV format (16kHz, mono)
         # If not, you may need additional conversion
-        with open(temp_file, 'wb') as f:
+        with open(temp_file, "wb") as f:
             f.write(audio_data)
-            
+
         return temp_file
-        
+
     except Exception as e:
         print(f"[Audio] Conversion error: {e}")
         return None
+
 
 # Ping/Pong keep-alive
 async def send_ping_to_clients():
@@ -383,26 +497,27 @@ async def send_ping_to_clients():
     while True:
         try:
             await asyncio.sleep(30)  # Every 30 seconds
-            
+
             for connection_id, connection_info in agent_connections.items():
                 websocket = connection_info.get("websocket")
                 if websocket:
                     event_id = f"ping_{asyncio.get_event_loop().time()}"
-                    await websocket.send_text(json.dumps({
-                        "type": "ping",
-                        "ping_event": {
-                            "event_id": event_id
-                        }
-                    }))
-                    
+                    await websocket.send_text(
+                        json.dumps(
+                            {"type": "ping", "ping_event": {"event_id": event_id}}
+                        )
+                    )
+
         except Exception as e:
             print(f"[Ping] Error: {e}")
+
 
 # Start ping task on startup
 @app.on_event("startup")
 async def startup_event():
     asyncio.create_task(send_ping_to_clients())
-    
+
+
 @app.post("/init_agent")
 async def init_agent(request: InitAgentRequest):
     """Initialize agent with ASR plugin"""
@@ -417,17 +532,29 @@ async def init_agent(request: InitAgentRequest):
             memoryConnection=request.memoryConnection,
             storageConnection=request.storageConnection,
         )
-        
+
         # Initialize ASR plugin if provided
         if request.asr_config:
             asr_plugin = create_plugin(
-                request.asr_config.plugin_type,
-                **request.asr_config.config_model
+                request.asr_config.plugin_type, **request.asr_config.config_model
             ).load()
             active_plugins[request.agent_name] = asr_plugin
-        
-        return {"success": True, "result": result, "asr_enabled": bool(request.asr_config)}
-    
+        if request.tts_config:
+            tts_id = await start_service(
+                name="tts",
+                config=request.tts_config,
+                health_url="http://127.0.0.1:1006/health-check",
+                run_fn_blocking=run_tts_app_func,
+                stop_fn=stop_tts_app,
+            )
+
+        return {
+            "success": True,
+            "result": result,
+            "asr_enabled": bool(request.asr_config),
+            tts_id: tts_id if request.tts_config else None,
+        }
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
