@@ -1500,12 +1500,6 @@ class MyModel(AIxBlockMLBase):
                     }]
                     
                     thinking = f"Enhanced tool extraction: {tool_name} via {extraction_method}. KB context: {len(kb_context)} chars"
-                    
-                    # Add KB context info to response if used
-                    if kb_used:
-                        kb_info = f"\n\n📚 *Used knowledge from: {', '.join(kb_used)}*"
-                        final_response += kb_info
-                
             # 🤖 Fallback to model generation if no tool detected
             if not final_response:
                 logger.info("🤖 No tool detected or tool failed, using model generation")
@@ -1592,6 +1586,24 @@ class MyModel(AIxBlockMLBase):
                     function_calls = []
             
             # 💾 Save to History
+            predictions = [
+                {
+                    "result": [
+                        {
+                            "from_name": "generated_text",
+                            "to_name": "text_output", 
+                            "type": "textarea",
+                            "value": {
+                                "thinking": [thinking], 
+                                "text": [final_response]
+                            },
+                        }
+                    ],
+                    "model_version": model_id,
+                }
+            ]
+
+            # 💾 Save to History
             if use_history:
                 try:
                     chat_manager.save_conversation_turn(
@@ -1610,14 +1622,13 @@ class MyModel(AIxBlockMLBase):
                     logger.info(f"💾 Saved to session {session_id}")
                 except Exception as e:
                     logger.error(f"❌ Save failed: {e}")
-            
-            # 🎯 Return Response
+
+            # 🎯 Return Response with new format
             return {
                 "success": True,
+                "message": "predict completed successfully",
+                "result": predictions,
                 "session_id": session_id,
-                "response": final_response,
-                "thinking": thinking,
-                "function_calls": function_calls,
                 "metadata": {
                     "model_id": model_id,
                     "history_turns": len(conversation_history),
