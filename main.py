@@ -12,11 +12,14 @@ from pydantic import BaseModel
 from services_manager import cancel_service, list_services, service_status, start_service
 from starlette.routing import Mount
 from model import MyModel, mcp
+from speech_to_text.plugin_loader import *
+from speech_to_text.asr_base import create_plugin
 from utils.chat_history import ChatHistoryManager
 import json
 from starlette.websockets import WebSocket
 import subprocess
 import atexit
+import base64
 from utils_voice_agent import (
     run_stt_app_func,
     run_tts_app_func,
@@ -29,26 +32,6 @@ from utils_voice_agent import (
 from starlette.websockets import WebSocket
 
 subprocess.run("venv/bin/python load_model.py", shell=True)
-
-
-# Models for request validation
-class InstallServiceRequest(BaseModel):
-    git: str
-
-
-class ServiceInfoRequest(BaseModel):
-    directory: str
-    port_map: Optional[int] = None
-
-
-class StopServiceRequest(BaseModel):
-    port_map: int
-    directory: Optional[str] = None
-
-
-class DashboardRequest(BaseModel):
-    directory: str
-
 
 app = FastAPI(
     title="My model",
@@ -65,15 +48,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Prometheus and Loki configuration
-LOKI_URL = os.getenv("LOKI_URL", "http://207.246.109.178:3100")
-JOB_NAME = os.getenv("JOB_NAME", "test-fastapi")
-PUSH_GATEWAY_URL = os.getenv("PUSH_GATEWAY_URL", "http://207.246.109.178:9091")
-JOB_INTERVAL = int(os.getenv("JOB_INTERVAL", 60))
-
 model = MyModel()
 chat_history = ChatHistoryManager(persist_directory="./chroma_db_history")
-
 
 class ActionRequest(BaseModel):
     command: str
@@ -82,95 +58,292 @@ class ActionRequest(BaseModel):
     session_id: Optional[str] = None
     use_history: Optional[bool] = True
 
+active_plugins: Dict[str, Any] = {}
+websocket_connections: Dict[str, WebSocket] = {}
+agent_connections: Dict[str, Dict[str, Any]] = {}
 
-@app.websocket("/ws/stream-token")
-async def websocket_llm(websocket: WebSocket):
+class ASRConfig(BaseModel):
+    plugin_type: str  # "whisper", "huggingface", etc
+    config_model: Dict[str, Any]  # model-specific config
+    
+class InitAgentRequest(BaseModel):
+    name: str
+    agent_name: str
+    endpoint: str
+    auth_token: Optional[str] = None
+    tools: Optional[List[Dict[str, Any]]] = None
+    memoryConnection: Optional[Dict[str, Any]] = None
+    storageConnection: Optional[Dict[str, Any]] = None
+    asr_config: Optional[ASRConfig] = None
+
+class ConversationState:
+    def __init__(self, agent_name: str):
+        self.agent_name = agent_name
+        self.is_initialized = False
+        self.audio_buffer = []
+        self.is_processing = False
+        self.conversation_id = f"conv_{agent_name}_{asyncio.get_event_loop().time()}"
+
+@app.websocket("/conversation")
+async def websocket_conversation_endpoint(websocket: WebSocket):
     await websocket.accept()
-    print("Connected")
+    
+    conversation_state = None
+    
     try:
-        while True:
-            data = await websocket.receive_text()
-            print(data)
-            message = json.loads(data)
-            response = model.action(
-                "predict",
-                **{"prompt": message["text"], "session_id": ""},
-            )
-            print(response["result"][0]["result"][0]["value"])
-
-            await websocket.send_json(
-                {
-                    "client_id": message["client_id"],
-                    "response": response["result"][0]["result"][0]["value"],
-                }
-            )
+        async for message in websocket.iter_text():
+            data = json.loads(message)
+            message_type = data.get("type")
+            
+            if message_type == "conversation_initiation_client_data":
+                conversation_state = await handle_init_conversation(websocket, data)
+            elif message_type == "user_audio_chunk":
+                if conversation_state:
+                    await handle_audio_chunk(websocket, data, conversation_state)
+            elif message_type == "pong":
+                await handle_pong(data)
+                
     except WebSocketDisconnect:
-        print("client disconnected")
-
+        print(f"[Agent] Client disconnected")
     except Exception as e:
-        print(f"❌ Error: {str(e)}")
+        print(f"[Agent] Error: {e}")
         await websocket.close()
 
-@app.post("/init-voice-agent")
-async def start_voice_agent(
-    stt_model: str = Body(default='mourinhan8/stt', embed=True),
-    tts_model: str = Body(default='mourinhan8/tts', embed=True)
-):
-    ensure_portaudio_installed()
-    stt_id = await start_service(
-        name="stt",
-        model=stt_model,
-        health_url="https://127.0.0.1:1005/health-check",
-        run_fn_blocking=run_stt_app_func,
-        stop_fn=stop_stt_app,
-    )
-    tts_id = await start_service(
-        name="tts",
-        model=tts_model,
-        health_url="http://127.0.0.1:1006/health-check",
-        run_fn_blocking=run_tts_app_func,
-        stop_fn=stop_tts_app,
-    )
-    return {"message": "starting", "services": {"stt": stt_id, "tts": tts_id}}
-
-@app.get("/voice-agent/status")
-async def status_all():
-    return await list_services()
-
-@app.get("/voice-agent/status/{service_id}")
-async def status_one(service_id: str):
-    data = await service_status(service_id)
-    return data
-
-class CancelReq(BaseModel):
-    port: int | None = None
-
-@app.post("/voice-agent/cancel/{service_id}")
-async def cancel_one(service_id: str, body: CancelReq):
-    data = await cancel_service(service_id, kill_by_port=body.port)
-    return data
-
-@app.post("/mcp/register")
-async def register_mcp_server(
-    name: str = Body(...),
-    endpoint: str = Body(...),
-    auth_token: str = Body(None),
-    tools: List[Dict[str, Any]] = Body(None),
-    memoryConnection: Dict[str, Any] = Body(None),
-    storageConnection: Dict[str, Any] = Body(None),
-):
-    """Register a remote MCP server"""
+async def handle_init_conversation(websocket: WebSocket, data: Dict[str, Any]) -> ConversationState:
+    """Handle conversation initialization"""
     try:
+        # Extract config
+        config = data.get("conversation_config_override", {})
+        agent_name = data.get("agent_name", "default_agent")
+        agent_config = config.get("agent", {})
+        prompt = agent_config.get("prompt", {}).get("prompt", "You are a helpful assistant")
+        first_message = agent_config.get("first_message", "Hello! How can I help you today?")
+        
+        # Create conversation state
+        conversation_state = ConversationState(agent_name)
+        
+        # Send ready signal
+        await websocket.send_text(json.dumps({
+            "type": "conversation_initiation_metadata",
+            "conversation_id": conversation_state.conversation_id
+        }))
+        
+        conversation_state.is_initialized = True
+        
+        # Send first message if provided
+        if first_message:
+            # Generate TTS for first message
+            first_audio = await text_to_speech(first_message)
+            
+            if first_audio:
+                await websocket.send_text(json.dumps({
+                    "type": "audio",
+                    "audio_event": {
+                        "audio_base_64": first_audio
+                    }
+                }))
+            
+            # Send agent response text
+            await websocket.send_text(json.dumps({
+                "type": "agent_response",
+                "agent_response_event": {
+                    "agent_response": first_message
+                }
+            }))
+        
+        return conversation_state
+        
+    except Exception as e:
+        print(f"[Agent] Init error: {e}")
+        raise
+
+async def handle_audio_chunk(websocket: WebSocket, data: Dict[str, Any], state: ConversationState):
+    """Handle incoming audio chunk"""
+    if not state.is_initialized or state.is_processing:
+        # Buffer audio if not ready
+        state.audio_buffer.append(data.get("user_audio_chunk"))
+        return
+    
+    state.is_processing = True
+    
+    try:
+        # Get audio data
+        audio_base64 = data.get("user_audio_chunk")
+        if not audio_base64:
+            return
+            
+        # Decode audio
+        audio_data = base64.b64decode(audio_base64)
+        
+        # Speech to Text using active plugin
+        transcript = await speech_to_text_with_plugin(audio_data, state.agent_name)
+        
+        if transcript:
+            # Send user transcript
+            await websocket.send_text(json.dumps({
+                "type": "user_transcript", 
+                "user_transcription_event": {
+                    "user_transcript": transcript
+                }
+            }))
+            
+            # Generate AI response
+            ai_response = await generate_ai_response(transcript, state.agent_name)
+            
+            # Send agent response text
+            await websocket.send_text(json.dumps({
+                "type": "agent_response",
+                "agent_response_event": {
+                    "agent_response": ai_response
+                }
+            }))
+            
+            # Generate and send audio response
+            audio_response = await text_to_speech(ai_response)
+            if audio_response:
+                await websocket.send_text(json.dumps({
+                    "type": "audio",
+                    "audio_event": {
+                        "audio_base_64": audio_response
+                    }
+                }))
+        
+    except Exception as e:
+        print(f"[Agent] Audio processing error: {e}")
+    finally:
+        state.is_processing = False
+
+async def handle_pong(data: Dict[str, Any]):
+    """Handle pong message"""
+    event_id = data.get("event_id")
+    print(f"[Agent] Received pong for event: {event_id}")
+
+async def speech_to_text_with_plugin(audio_data: bytes, agent_name: str) -> Optional[str]:
+    """Convert speech to text using active ASR plugin"""
+    try:
+        # Get ASR plugin for this agent
+        asr_plugin = active_plugins.get(agent_name, active_plugins.get(agent_name))
+        
+        if not asr_plugin:
+            print(f"[STT] No ASR plugin found for agent: {agent_name}")
+            return None
+        
+        # Convert audio data to format expected by plugin
+        # audio_file = convert_audio_to_wav(audio_data)
+        
+        # Run STT
+        result = await asyncio.to_thread(asr_plugin.predict, audio_data)
+        
+        if isinstance(result, dict):
+            return result.get('text', '')
+        return str(result) if result else None
+        
+    except Exception as e:
+        print(f"[STT] Error: {e}")
+        return None
+
+async def generate_ai_response(text: str, agent_name: str) -> str:
+    """Generate AI response using model"""
+    try:
+        # Use existing model to generate response
+        action_request = ActionRequest(
+            command="predict",
+            params={
+                "prompt": text,
+                "enable_function_calling": True,
+            },
+            session_id=agent_name,
+            use_history=True
+        )
+        
+        response = model.action(
+            action_request.command,
+            **action_request.params,
+            session_id=action_request.session_id,
+            use_history=action_request.use_history
+        )
+        
+        # Extract text from response
+        if isinstance(response, dict):
+            return response.get("response", "I'm sorry, I couldn't process that.")
+        return str(response) if response else "I'm sorry, I couldn't process that."
+        
+    except Exception as e:
+        print(f"[AI] Response generation error: {e}")
+        return "I'm sorry, there was an error processing your request."
+
+async def text_to_speech(text: str) -> Optional[str]:
+    """Convert text to speech and return base64 audio"""
+    return None
+
+def convert_audio_to_wav(audio_data: bytes) -> str:
+    """Convert audio data to WAV file for ASR plugin"""
+    try:
+        # Create temporary WAV file
+        temp_file = f"/tmp/audio_{asyncio.get_event_loop().time()}.wav"
+        
+        # Assume audio_data is already in WAV format (16kHz, mono)
+        # If not, you may need additional conversion
+        with open(temp_file, 'wb') as f:
+            f.write(audio_data)
+            
+        return temp_file
+        
+    except Exception as e:
+        print(f"[Audio] Conversion error: {e}")
+        return None
+
+# Ping/Pong keep-alive
+async def send_ping_to_clients():
+    """Send periodic ping to all connected clients"""
+    while True:
+        try:
+            await asyncio.sleep(30)  # Every 30 seconds
+            
+            for connection_id, connection_info in agent_connections.items():
+                websocket = connection_info.get("websocket")
+                if websocket:
+                    event_id = f"ping_{asyncio.get_event_loop().time()}"
+                    await websocket.send_text(json.dumps({
+                        "type": "ping",
+                        "ping_event": {
+                            "event_id": event_id
+                        }
+                    }))
+                    
+        except Exception as e:
+            print(f"[Ping] Error: {e}")
+
+# Start ping task on startup
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(send_ping_to_clients())
+    
+@app.post("/init_agent")
+async def init_agent(request: InitAgentRequest):
+    """Initialize agent with ASR plugin"""
+    try:
+        # Original MCP logic
         result = model.action(
             "mcp_register_payload",
-            name=name,
-            endpoint=endpoint,
-            auth_token=auth_token,
-            tools=tools,
-            memoryConnection=memoryConnection,
-            storageConnection=storageConnection,
+            name=request.name,
+            endpoint=request.endpoint,
+            auth_token=request.auth_token,
+            tools=request.tools,
+            memoryConnection=request.memoryConnection,
+            storageConnection=request.storageConnection,
         )
-        return result
+        
+        # Initialize ASR plugin if provided
+        if request.asr_config:
+            asr_plugin = create_plugin(
+                request.asr_config.plugin_type,
+                **request.asr_config.config_model
+            ).load()
+            active_plugins[request.agent_name] = asr_plugin
+        
+        return {"success": True, "result": result, "asr_enabled": bool(request.asr_config)}
+    
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -218,16 +391,6 @@ async def update_prompt_template(template_name: str = Body(...), template_text: 
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/mcp/tools")
-async def list_mcp_tools():
-    """List all available MCP tools"""
-    try:
-        result = model.action("mcp_list_tools")
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.post("/action")
 async def action(request: ActionRequest = Body(...)):
