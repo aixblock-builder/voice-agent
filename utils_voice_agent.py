@@ -68,23 +68,11 @@ def load_model(folder):
     load_model_file = os.path.join(folder, "load_model.py")
     if os.path.exists(load_model_file):
         cmd = f"cd {folder} && venv/bin/python load_model.py"
-        load_model_process = subprocess.Popen(
+        subprocess.run(
             cmd,
             shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
+            check=True,
         )
-        for line in iter(load_model_process.stdout.readline, ''):
-            print(line.strip())
-
-        for line in iter(load_model_process.stderr.readline, ''):
-            print(line.strip())
-
-        load_model_process.stdout.close()
-        load_model_process.stderr.close()
-        load_model_process.wait()
         print(f"Hoàn thành load model từ {load_model_file}")
 
 
