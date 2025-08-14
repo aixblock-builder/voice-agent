@@ -1,5 +1,5 @@
 # whisper_plugin.py
-from asr_base import AsrBase, register_plugin
+from .asr_base import AsrBase, register_plugin
 import whisper
 import numpy as np
 from typing import Union

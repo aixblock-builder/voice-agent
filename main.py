@@ -11,7 +11,6 @@ from fastapi import (
     Request,
     Body,
     WebSocketDisconnect,
-    BackgroundTasks,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, JSONResponse
@@ -22,13 +21,27 @@ from services_manager import (
     list_services,
     service_status,
     start_service,
+    run_tts_app_func,
+    stop_tts_app,
+    tts_proc,
+    ensure_portaudio_installed,
 )
 from starlette.routing import Mount
 from model import MyModel, mcp
 from speech_to_text.plugin_loader import *
 from speech_to_text.asr_base import create_plugin
-from stt.app import CHUNK_SIZE_BYTES, MAX_RECORDING_FRAMES, SILENCE_FRAMES_THRESHOLD, VAD_SPEECH_THRESHOLD
-from stt.llm_client import get_audio_from_tts_service
+from utils.vad_utils import (
+    CHUNK_SIZE_BYTES,
+    MAX_RECORDING_FRAMES,
+    SILENCE_FRAMES_THRESHOLD,
+    VAD_SPEECH_THRESHOLD,
+    BYTES_PER_SAMPLE,
+    FRAME_SIZE,
+    process_frame,
+)
+from utils.voice_agent_utils import (
+    get_audio_from_tts_service,
+)
 from utils.chat_history import ChatHistoryManager
 from utils.socket_manager import ConnectionManager
 import json
@@ -36,14 +49,6 @@ from starlette.websockets import WebSocket
 import subprocess
 import atexit
 import base64
-from utils.vad_utils import BYTES_PER_SAMPLE, FRAME_SIZE, process_frame
-from utils_voice_agent import (
-    run_tts_app_func,
-    stop_tts_app,
-    tts_proc,
-    stt_proc,
-    ensure_portaudio_installed,
-)
 from starlette.websockets import WebSocket
 import torch
 
@@ -51,8 +56,16 @@ ensure_portaudio_installed()
 
 subprocess.run("venv/bin/python load_model.py", shell=True)
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    asyncio.create_task(send_ping_to_clients())
+    yield
+
+
 app = FastAPI(
     title="My model",
+    lifespan=lifespan,
     openapi_url="/swagger.json",
     docs_url="/swagger",
 )
@@ -88,6 +101,11 @@ class ASRConfig(BaseModel):
     config_model: Dict[str, Any]  # model-specific config
 
 
+class TTSConfig(BaseModel):
+    engine_name: str  # "kokoro", "coqui", etc
+    engine_kwargs: Dict[str, Any]  # engine-specific config
+
+
 class InitAgentRequest(BaseModel):
     name: str
     agent_name: str
@@ -97,6 +115,7 @@ class InitAgentRequest(BaseModel):
     memoryConnection: Optional[Dict[str, Any]] = None
     storageConnection: Optional[Dict[str, Any]] = None
     asr_config: Optional[ASRConfig] = None
+    tts_config: Optional[TTSConfig] = None
 
 
 class ConversationState:
@@ -133,7 +152,9 @@ async def websocket_conversation_endpoint(websocket: WebSocket):
         print(f"[Agent] Error: {e}")
         await websocket.close()
 
+
 manager = ConnectionManager()
+
 
 @app.websocket("/ws/audio_stream")
 async def websocket_endpoint(websocket: WebSocket):
@@ -160,18 +181,18 @@ async def websocket_endpoint(websocket: WebSocket):
                 speech_frame_count = 0
                 frame_byte_size = FRAME_SIZE * BYTES_PER_SAMPLE
                 for i in range(0, len(chunk_bytes), frame_byte_size):
-                    frame_data = chunk_bytes[i:i + frame_byte_size]
+                    frame_data = chunk_bytes[i : i + frame_byte_size]
                     if len(frame_data) < frame_byte_size:
-                        continue # Bỏ qua frame cuối nếu không đủ byte
+                        continue  # Bỏ qua frame cuối nếu không đủ byte
 
                     # Gọi hàm xử lý mới, thuần túy
                     is_speech, waveform = process_frame(frame_data)
-                    
+
                     if waveform is not None:
                         frames.append(waveform)
                         if is_speech:
                             speech_frame_count += 1
-                
+
                 if not frames:
                     continue
 
@@ -184,29 +205,49 @@ async def websocket_endpoint(websocket: WebSocket):
                     else:
                         silence_counter += len(frames)
 
-                    if silence_counter > SILENCE_FRAMES_THRESHOLD or len(recording_buffer) > MAX_RECORDING_FRAMES:
-                        print(f"[*] Dừng ghi âm. Tổng số khung: {len(recording_buffer)}")
+                    if (
+                        silence_counter > SILENCE_FRAMES_THRESHOLD
+                        or len(recording_buffer) > MAX_RECORDING_FRAMES
+                    ):
+                        print(
+                            f"[*] Dừng ghi âm. Tổng số khung: {len(recording_buffer)}"
+                        )
                         final_waveform = torch.cat(recording_buffer, dim=1)
-                        int16_tensor = (final_waveform.squeeze() * 32767).to(torch.int16)
+                        int16_tensor = (final_waveform.squeeze() * 32767).to(
+                            torch.int16
+                        )
                         audio_bytes = int16_tensor.cpu().numpy().tobytes()
-                        transcript = await speech_to_text_with_plugin(audio_bytes, conversation_state.agent_name)
+                        transcript = await speech_to_text_with_plugin(
+                            audio_bytes, conversation_state.agent_name
+                        )
                         print(transcript)
                         if transcript:
                             if manager.cancel_pipeline(client_id):
-                                await manager.send_json_to_client({"type": "control", "event": "interrupt"}, client_id)                            
-                            await manager.send_json_to_client({ 
-                                "type": "transcript", 
-                                "transcript": transcript
-                            }, client_id)
-                            ai_response = await generate_ai_response(transcript, conversation_state.agent_name)
+                                await manager.send_json_to_client(
+                                    {"type": "control", "event": "interrupt"}, client_id
+                                )
+                            await manager.send_json_to_client(
+                                {"type": "transcript", "transcript": transcript},
+                                client_id,
+                            )
+                            ai_response = await generate_ai_response(
+                                transcript, conversation_state.agent_name
+                            )
                             if ai_response:
-                                task = asyncio.create_task(llm_tts_pipeline(client_id, ai_response, manager, conversation_state.agent_name))
+                                task = asyncio.create_task(
+                                    llm_tts_pipeline(
+                                        client_id,
+                                        ai_response,
+                                        manager,
+                                        conversation_state.agent_name,
+                                    )
+                                )
                                 manager.set_pipeline_task(client_id, task)
 
                         is_recording = False
                         recording_buffer.clear()
                         silence_counter = 0
-                
+
                 elif speech_probability > VAD_SPEECH_THRESHOLD:
                     print("[*] Bắt đầu ghi âm...")
                     is_recording = True
@@ -225,11 +266,14 @@ async def websocket_endpoint(websocket: WebSocket):
         print(f"Closing connection for client {client_id}.")
         await manager.disconnect(client_id)
 
+
 async def llm_tts_pipeline(client_id, transcript, manager, agent_name):
     tts_task = None
     try:
         ai_response = await generate_ai_response(transcript, agent_name)
-        tts_task = asyncio.create_task(get_audio_from_tts_service(client_id, ai_response, manager))
+        tts_task = asyncio.create_task(
+            get_audio_from_tts_service(client_id, ai_response, manager)
+        )
         await tts_task
     except Exception as e:
         print(f"Error in TTS pipeline: {e}")
@@ -237,15 +281,17 @@ async def llm_tts_pipeline(client_id, transcript, manager, agent_name):
             tts_task.cancel()
         return None
     except asyncio.CancelledError:
-            # Task bị huỷ khi user gửi prompt mới → im lặng thoát
-            print(f"[PIPE] Pipeline client {client_id} bị huỷ (prompt mới).")
-            if tts_task is not None:
-                tts_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await tts_task   # chờ cleanup đóng stream
+        # Task bị huỷ khi user gửi prompt mới → im lặng thoát
+        print(f"[PIPE] Pipeline client {client_id} bị huỷ (prompt mới).")
+        if tts_task is not None:
+            tts_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await tts_task  # chờ cleanup đóng stream
     except Exception as e:
         print(f"[PIPE] Lỗi pipeline: {e}")
-        await manager.send_json_to_client({"error": "Internal pipeline error"}, client_id)
+        await manager.send_json_to_client(
+            {"error": "Internal pipeline error"}, client_id
+        )
 
 
 @app.get("/tts/status")
@@ -257,6 +303,8 @@ async def status_all():
 async def status_one(service_id: str):
     data = await service_status(service_id)
     return data
+
+
 class CancelReq(BaseModel):
     port: int | None = None
 
@@ -512,26 +560,21 @@ async def send_ping_to_clients():
             print(f"[Ping] Error: {e}")
 
 
-# Start ping task on startup
-@app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(send_ping_to_clients())
-
-
 @app.post("/init_agent")
 async def init_agent(request: InitAgentRequest):
     """Initialize agent with ASR plugin"""
     try:
         # Original MCP logic
-        result = model.action(
-            "mcp_register_payload",
-            name=request.name,
-            endpoint=request.endpoint,
-            auth_token=request.auth_token,
-            tools=request.tools,
-            memoryConnection=request.memoryConnection,
-            storageConnection=request.storageConnection,
-        )
+        # result = model.action(
+        #     "mcp_register_payload",
+        #     name=request.name,
+        #     endpoint=request.endpoint,
+        #     auth_token=request.auth_token,
+        #     tools=request.tools,
+        #     memoryConnection=request.memoryConnection,
+        #     storageConnection=request.storageConnection,
+        # )
+        print("[Agent] Initializing agent:", request.agent_name)
 
         # Initialize ASR plugin if provided
         if request.asr_config:
@@ -540,6 +583,7 @@ async def init_agent(request: InitAgentRequest):
             ).load()
             active_plugins[request.agent_name] = asr_plugin
         if request.tts_config:
+            print("[Agent] Initializing TTS service")
             tts_id = await start_service(
                 name="tts",
                 config=request.tts_config,
@@ -547,10 +591,9 @@ async def init_agent(request: InitAgentRequest):
                 run_fn_blocking=run_tts_app_func,
                 stop_fn=stop_tts_app,
             )
-
         return {
             "success": True,
-            "result": result,
+            # "result": result,
             "asr_enabled": bool(request.asr_config),
             tts_id: tts_id if request.tts_config else None,
         }
@@ -903,8 +946,6 @@ async def handle_sse(request: Request):
 
 def cleanup():
     print("Stopping child apps...")
-    if stt_proc:
-        stt_proc.terminate()
     if tts_proc:
         tts_proc.terminate()
 
@@ -936,6 +977,6 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=3000,
         # Bạn cũng có thể thêm các cấu hình khác ở đây
-        # ssl_keyfile="ssl/key.pem",
-        # ssl_certfile="ssl/cert.pem",
+        ssl_keyfile="ssl/key.pem",
+        ssl_certfile="ssl/cert.pem",
     )
