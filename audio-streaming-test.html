@@ -142,7 +142,7 @@
       await setupWorklet();
 
       if (!socket) {
-        socket = await new WebSocket(`wss://${window.location.host}/ws/audio`);
+        socket = await new WebSocket(`wss://${window.location.host}/ws/audio_stream`);
       }
       const source = audioContext.createMediaStreamSource(stream);
 

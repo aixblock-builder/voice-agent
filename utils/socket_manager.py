@@ -42,19 +42,17 @@ class ConnectionManager:
             self.tts_tasks[client_id].cancel()
         self.tts_tasks[client_id] = task
 
-    def set_pipeline_task(self, client_id: str, task: asyncio.Task, cleanup_fn):
+    def set_pipeline_task(self, client_id: str, task: asyncio.Task):
         # Huỷ pipeline cũ nếu còn chạy
         old = self.pipeline_tasks.get(client_id)
         if old and not old.done():
             old.cancel()
-            cleanup_fn(client_id)
         self.pipeline_tasks[client_id] = task
 
-    def cancel_pipeline(self, client_id: str, cleanup_fn):
+    def cancel_pipeline(self, client_id: str):
         task = self.pipeline_tasks.get(client_id)
         if task and not task.done():
             task.cancel()
-            cleanup_fn(client_id)
             return True
         return False
 

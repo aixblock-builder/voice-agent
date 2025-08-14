@@ -8,6 +8,14 @@ from silero_vad import load_silero_vad
 SAMPLE_RATE = 16000
 FRAME_SIZE = 512
 BYTES_PER_SAMPLE = 2
+FRAMES_PER_BUFFER = 10
+VAD_SPEECH_THRESHOLD = 0.6
+SILENCE_TIMEOUT_SECONDS = 1.5
+MAX_RECORDING_SECONDS = 30
+CHUNK_SIZE_BYTES = FRAME_SIZE * 2 * FRAMES_PER_BUFFER
+SILENCE_FRAMES_THRESHOLD = int((SILENCE_TIMEOUT_SECONDS * SAMPLE_RATE) / FRAME_SIZE)
+MAX_RECORDING_FRAMES = int((MAX_RECORDING_SECONDS * SAMPLE_RATE) / FRAME_SIZE)
+BYTES_PER_SAMPLE = 2
 vad_model = load_silero_vad()
 
 
@@ -34,33 +42,3 @@ def process_frame(frame_bytes: bytes) -> tuple[bool, torch.Tensor | None]:
         return False, waveform
 
     return is_speech, waveform
-
-# def save_buffer_to_mp3(waveform: torch.Tensor, sample_rate: int) -> str:
-#     """
-#     Save a waveform tensor to an MP3 file using pydub.
-
-#     Args:
-#         waveform (torch.Tensor): Shape (1, num_samples)
-#         sample_rate (int): Sampling rate
-
-#     Returns:
-#         str: Path to saved MP3 file
-#     """
-#     # Ensure mono channel
-#     if waveform.shape[0] > 1:
-#         waveform = waveform[0].unsqueeze(0)
-
-#     # Convert to NumPy int16 (pydub expects this)
-#     samples = (waveform.squeeze().numpy() * 32767).astype(np.int16)
-
-#     # Convert to AudioSegment
-#     audio_segment = AudioSegment(
-#         samples.tobytes(),
-#         frame_rate=sample_rate,
-#         sample_width=2,  # 16-bit => 2 bytes
-#         channels=1
-#     )
-
-#     filename = f"{uuid.uuid4()}.mp3"
-#     audio_segment.export(filename, format="mp3")
-#     return filename

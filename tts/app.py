@@ -102,13 +102,12 @@ async def tts(
         for index, sentence in enumerate(sentences):
             audio_bytes = await synth_sentence_pcm(sentence)
 
-            # CẢNH BÁO: list(audio_bytes) rất to; cân nhắc dùng base64 (xem ghi chú bên dưới)
             json_data = {
                 "text_index": index,
                 "is_last": index == len(sentences) - 1,
                 "text_length": len(sentence),
                 "text": [sentence],
-                "audio": list(audio_bytes),  # hoặc "audio_b64": base64.b64encode(audio_bytes).decode()
+                "audio": list(audio_bytes),
                 "sample_rate": 24000,
                 "sample_format": "s16le",
                 "channels": 1,
