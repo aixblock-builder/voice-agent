@@ -71,4 +71,6 @@ psycopg2-binary
 librosa
 openai-whisper==20240930
 kokoro-onnx
-onnxruntime-gpu==1.22.0
+onnxruntime-gpu==1.21.1
+silero_vad
+webrtcvad
