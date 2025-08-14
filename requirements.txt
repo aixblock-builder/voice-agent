@@ -69,4 +69,4 @@ pysmb
 qdrant_client
 psycopg2-binary
 librosa
-openai-whispe==20240930
+openai-whisper==20240930
