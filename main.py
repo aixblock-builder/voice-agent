@@ -568,15 +568,15 @@ async def init_agent(request: InitAgentRequest):
     """Initialize agent with ASR plugin"""
     try:
         # Original MCP logic
-        # result = model.action(
-        #     "mcp_register_payload",
-        #     name=request.name,
-        #     endpoint=request.endpoint,
-        #     auth_token=request.auth_token,
-        #     tools=request.tools,
-        #     memoryConnection=request.memoryConnection,
-        #     storageConnection=request.storageConnection,
-        # )
+        result = model.action(
+            "mcp_register_payload",
+            name=request.name,
+            endpoint=request.endpoint,
+            auth_token=request.auth_token,
+            tools=request.tools,
+            memoryConnection=request.memoryConnection,
+            storageConnection=request.storageConnection,
+        )
         print("[Agent] Initializing agent:", request.agent_name)
 
         # Initialize ASR plugin if provided
@@ -596,9 +596,9 @@ async def init_agent(request: InitAgentRequest):
             )
         return {
             "success": True,
-            # "result": result,
+            "result": result,
             "asr_enabled": bool(request.asr_config),
-            tts_id: tts_id if request.tts_config else None,
+            "tts_id": tts_id if request.tts_config else None,
         }
 
     except Exception as e:
