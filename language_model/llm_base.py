@@ -12,10 +12,10 @@ def register_llm_plugin(name: str):
     return decorator
 
 class LlmBase(ABC):
-    def __init__(self, model_id: str, **kwargs):
-        self.model_id = model_id
-        self.config_tokenizer = kwargs.config_tokenizer if "config_tokenizer" in kwargs else {}
-        self.config_pipeline = kwargs.config_pipeline if "config_pipeline" in kwargs else {}
+    def __init__(self, **kwargs):
+        self.model_id = kwargs['model_id']
+        self.config_tokenizer = kwargs['config_tokenizer'] if "config_tokenizer" in kwargs else {}
+        self.config_pipeline = kwargs['config_pipeline'] if "config_pipeline" in kwargs else {}
         self.pipeline = None
         self.tokenizer = None
         self.device = self._get_device()

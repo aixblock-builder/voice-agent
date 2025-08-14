@@ -1,11 +1,10 @@
 from language_model.llm_base import LlmBase, register_llm_plugin
-
+import torch
 
 @register_llm_plugin("qwen")
 class QwenPlugin(LlmBase):
-    def __init__(self, model_id: str, **kwargs):
-        super().__init__(model_id, **kwargs)
-        self.model_id = model_id
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
         self.language = kwargs.get("language", "en")
     
     def load(self, **kwargs):

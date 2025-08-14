@@ -58,9 +58,6 @@ import torch
 
 ensure_portaudio_installed()
 
-subprocess.run("venv/bin/python load_model.py", shell=True)
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     asyncio.create_task(send_ping_to_clients())
@@ -131,6 +128,7 @@ class InitAgentRequest(BaseModel):
     storageConnection: Optional[Dict[str, Any]] = None
     asr_config: Optional[ASRConfig] = None
     tts_config: Optional[TTSConfig] = None
+    llm_config: Optional[LLMConfig] = None
 
 class ConversationState:
     def __init__(self, agent_name: str):
@@ -593,15 +591,15 @@ async def init_agent(request: InitAgentRequest):
     """Initialize agent with ASR plugin"""
     try:
         # Original MCP logic
-        # result = model.action(
-        #     "mcp_register_payload",
-        #     name=request.name,
-        #     endpoint=request.endpoint,
-        #     auth_token=request.auth_token,
-        #     tools=request.tools,
-        #     memoryConnection=request.memoryConnection,
-        #     storageConnection=request.storageConnection,
-        # )
+        result = model.action(
+            "mcp_register_payload",
+            name=request.name,
+            endpoint=request.endpoint,
+            auth_token=request.auth_token,
+            tools=request.tools,
+            memoryConnection=request.memoryConnection,
+            storageConnection=request.storageConnection,
+        )
 
         # Initialize ASR plugin if provided
         if request.asr_config:
@@ -623,13 +621,18 @@ async def init_agent(request: InitAgentRequest):
         if request.llm_config:
             llm_plugin = create_plugin(
                 request.llm_config.plugin_type,
-                **request.llm_config.config_model,
+                **request.llm_config.config_model.model_dump(),
             ).load()
             active_llm_plugins[request.agent_name] = llm_plugin
 
-        return {"success": True, "result": result, "asr_enabled": bool(request.asr_config)}
+        return {
+            "success": True, 
+            "result": result, 
+            "asr_enabled": bool(request.asr_config)
+        }
     
     except Exception as e:
+        print(f"[Agent] Initialization error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1007,7 +1010,7 @@ if __name__ == "__main__":
     uvicorn.run(
         app,
         host="0.0.0.0",
-        port=1005,
+        port=3000,
         # Bạn cũng có thể thêm các cấu hình khác ở đây
         ssl_keyfile="ssl/key.pem",
         ssl_certfile="ssl/cert.pem",

@@ -275,8 +275,8 @@ class MyModel(AIxBlockMLBase):
                     # Determine source
                     if hf_token:
                         login(token=hf_token)
-                    llm_plugin.load_pipeline()
                     llm_plugin = active_llm_plugins.get(agent_name, active_llm_plugins.get(agent_name))
+                    llm_plugin.load()
                     if not llm_plugin:
                         raise ValueError(f"LLM Plugin {agent_name} not found")
                     tokenizer = llm_plugin.tokenizer

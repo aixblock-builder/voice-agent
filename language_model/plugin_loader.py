@@ -1,1 +1,1 @@
-from qwen_plugin import *
+from .qwen_plugin import *
