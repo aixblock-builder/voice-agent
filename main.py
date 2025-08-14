@@ -42,6 +42,8 @@ from utils_voice_agent import (
     ensure_portaudio_installed,
 )
 from starlette.websockets import WebSocket
+from language_model.plugin_loader import *
+from language_model.llm_base import create_plugin
 
 ensure_portaudio_installed()
 
@@ -79,6 +81,10 @@ agent_connections: Dict[str, Dict[str, Any]] = {}
 class ASRConfig(BaseModel):
     plugin_type: str  # "whisper", "huggingface", etc
     config_model: Dict[str, Any]  # model-specific config
+
+class LLMConfig(BaseModel):
+    plugin_type: str  # "gpt", "llama", etc
+    config_model: Dict[str, Any]
     
 class InitAgentRequest(BaseModel):
     name: str

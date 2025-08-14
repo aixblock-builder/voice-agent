@@ -10,8 +10,14 @@ class QwenPlugin(LlmBase):
     
     def load_pipeline(self, **kwargs):
         from transformers import AutoModelForCausalLM, AutoTokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(self._get_model_source(), **kwargs)
-        self.pipeline = AutoModelForCausalLM.from_pretrained(self._get_model_source(), device_map="auto", **kwargs)
+        source = self._get_model_source()
+        self.tokenizer = AutoTokenizer.from_pretrained(source, **kwargs)
+        device = self._get_device()
+        dtype = torch.bfloat16 if device == "cuda" else torch.float16
+        if device == "cuda":
+            self.pipeline = AutoModelForCausalLM.from_pretrained(source, torch_dtype=dtype, device_map="auto", **kwargs)
+        else:
+            self.pipeline = AutoModelForCausalLM.from_pretrained(source, torch_dtype=dtype, device_map="cpu", **kwargs)
         return self
     
     def load_tokenizer(self, **kwargs):

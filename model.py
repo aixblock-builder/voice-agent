@@ -46,7 +46,6 @@ model_loaded_demo = False
 # Parameters for model deployment
 pipe_prediction = None
 tokenizer = None
-model_predict: Dict = None
 active_llm_plugins: Dict[str, LlmBase] = {}
 
 
@@ -264,7 +263,7 @@ class MyModel(AIxBlockMLBase):
                 
                 # 🏭 Load Model
                 def ensure_model_loaded():
-                    global pipe_prediction, tokenizer, model_predict
+                    global pipe_prediction, tokenizer
                     
                     if pipe_prediction:
                         return
@@ -276,14 +275,12 @@ class MyModel(AIxBlockMLBase):
                     if hf_token:
                         login(token=hf_token)
                     llm_plugin.load_pipeline()
-                    llm_plugin.load_tokenizer()
                     llm_plugin = active_llm_plugins.get(agent_name, active_llm_plugins.get(agent_name))
                     if not llm_plugin:
                         raise ValueError(f"LLM Plugin {agent_name} not found")
                     tokenizer = llm_plugin.tokenizer
                     pipe_prediction = llm_plugin.pipeline
                     
-                    model_predict = model_id
                     logger.info(f"✅ Model loaded: {model_id}")
                 
                 ensure_model_loaded()
