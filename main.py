@@ -586,7 +586,7 @@ async def init_agent(request: InitAgentRequest):
             print("[Agent] Initializing TTS service")
             tts_id = await start_service(
                 name="tts",
-                config=request.tts_config,
+                config=request.tts_config.dict(),
                 health_url="http://127.0.0.1:1006/health-check",
                 run_fn_blocking=run_tts_app_func,
                 stop_fn=stop_tts_app,
@@ -975,7 +975,7 @@ if __name__ == "__main__":
     uvicorn.run(
         app,
         host="0.0.0.0",
-        port=3000,
+        port=1005,
         # Bạn cũng có thể thêm các cấu hình khác ở đây
         ssl_keyfile="ssl/key.pem",
         ssl_certfile="ssl/cert.pem",

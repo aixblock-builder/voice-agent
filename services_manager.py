@@ -40,7 +40,6 @@ def ensure_portaudio_installed():
 
 def setup_app(folder: str, config: Optional[dict] = None):
     cfg_path = os.path.join(folder, "config.json")
-    print(f"[setup_app] Config path: {cfg_path}")
     if config is not None:
         with open(cfg_path, "w", encoding="utf-8") as f:
             json.dump(config, f, ensure_ascii=False, indent=2)
