@@ -16,36 +16,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, JSONResponse
 from mcp.server.sse import SseServerTransport
 from pydantic import BaseModel
-from services_manager import (
-    cancel_service,
-    list_services,
-    service_status,
-    start_service,
-)
+
 from starlette.routing import Mount
 from model import MyModel, mcp
 from speech_to_text.plugin_loader import *
-from speech_to_text.asr_base import create_plugin
+from text_to_speech.plugin_loader import *
+from speech_to_text.asr_base import create_plugin as create_asr_plugin
+from text_to_speech.tts_base import create_plugin as create_tts_plugin
 from utils.chat_history import ChatHistoryManager
 import json
 from starlette.websockets import WebSocket
-import subprocess
 import atexit
 import base64
-from utils_voice_agent import (
-    run_stt_app_func,
-    run_tts_app_func,
-    stop_stt_app,
-    stop_tts_app,
-    tts_proc,
-    stt_proc,
-    ensure_portaudio_installed,
-)
 from starlette.websockets import WebSocket
-
-ensure_portaudio_installed()
-
-subprocess.run("venv/bin/python load_model.py", shell=True)
 
 app = FastAPI(
     title="My model",
@@ -72,14 +55,19 @@ class ActionRequest(BaseModel):
     session_id: Optional[str] = None
     use_history: Optional[bool] = True
 
-active_plugins: Dict[str, Any] = {}
+active_plugins_asr: Dict[str, Any] = {}
+active_plugins_tts: Dict[str, Any] = {}
 websocket_connections: Dict[str, WebSocket] = {}
 agent_connections: Dict[str, Dict[str, Any]] = {}
 
 class ASRConfig(BaseModel):
     plugin_type: str  # "whisper", "huggingface", etc
     config_model: Dict[str, Any]  # model-specific config
-    
+
+class TTSConfig(BaseModel):
+    plugin_type: str  # "xtts2", "kokoro", etc
+    config_model: Dict[str, Any]  # model-specific config
+
 class InitAgentRequest(BaseModel):
     name: str
     agent_name: str
@@ -89,6 +77,7 @@ class InitAgentRequest(BaseModel):
     memoryConnection: Optional[Dict[str, Any]] = None
     storageConnection: Optional[Dict[str, Any]] = None
     asr_config: Optional[ASRConfig] = None
+    tts_config: Optional[TTSConfig] = None
 
 class ConversationState:
     def __init__(self, agent_name: str):
@@ -122,65 +111,6 @@ async def websocket_conversation_endpoint(websocket: WebSocket):
     except Exception as e:
         print(f"[Agent] Error: {e}")
         await websocket.close()
-
-
-@app.post("/init-voice-agent")
-async def start_voice_agent(
-    stt_config: Optional[Dict[str, Any]] = Body(None),
-    tts_config: Optional[Dict[str, Any]] = Body(None),
-):
-    stt_id = await start_service(
-        name="stt",
-        config=stt_config,
-        health_url="https://127.0.0.1:1005/health-check",
-        run_fn_blocking=run_stt_app_func,
-        stop_fn=stop_stt_app,
-    )
-    tts_id = await start_service(
-        name="tts",
-        config=tts_config,
-        health_url="http://127.0.0.1:1006/health-check",
-        run_fn_blocking=run_tts_app_func,
-        stop_fn=stop_tts_app,
-    )
-    return {
-        "message": "starting",
-        "services": {
-            "stt": stt_id,
-            "tts": tts_id,
-            "socket": {
-                "port": 1005,
-                "protocol": "wss",
-                "endpoint": "/ws/audio",
-            },
-        },
-    }
-
-
-@app.get("/voice-agent/status")
-async def status_all():
-    return await list_services()
-
-
-@app.get("/voice-agent/status/{service_id}")
-async def status_one(service_id: str):
-    data = await service_status(service_id)
-    data["socket"] = {
-        "port": 1005,
-        "protocol": "wss",
-        "endpoint": "/ws/audio",
-    }
-    return data
-
-
-class CancelReq(BaseModel):
-    port: int | None = None
-
-
-@app.post("/voice-agent/cancel/{service_id}")
-async def cancel_one(service_id: str, body: CancelReq):
-    data = await cancel_service(service_id, kill_by_port=body.port)
-    return data
 
 
 @app.post("/mcp/register")
@@ -217,7 +147,7 @@ async def handle_init_conversation(websocket: WebSocket, data: Dict[str, Any]) -
         # Send first message if provided
         if first_message:
             # Generate TTS for first message
-            first_audio = await text_to_speech(first_message)
+            first_audio = await text_to_speech(first_message, agent_name)
             
             if first_audio:
                 await websocket.send_text(json.dumps({
@@ -272,7 +202,8 @@ async def handle_audio_chunk(websocket: WebSocket, data: Dict[str, Any], state: 
             }))
             
             # Generate AI response
-            ai_response = await generate_ai_response(transcript, state.agent_name)
+            ai_response = await generate_ai_response(transcript, state.agent_name, state.conversation_id)
+            print("====ai_response====", ai_response)
             
             # Send agent response text
             await websocket.send_text(json.dumps({
@@ -283,14 +214,18 @@ async def handle_audio_chunk(websocket: WebSocket, data: Dict[str, Any], state: 
             }))
             
             # Generate and send audio response
-            audio_response = await text_to_speech(ai_response)
-            if audio_response:
-                await websocket.send_text(json.dumps({
-                    "type": "audio",
-                    "audio_event": {
-                        "audio_base_64": audio_response
-                    }
-                }))
+            chunk_size = 200  # Điều chỉnh theo nhu cầu
+            chunks = [ai_response[i:i+chunk_size] for i in range(0, len(ai_response), chunk_size)]
+
+            for chunk in chunks:
+                audio_response = await text_to_speech(chunk, state.agent_name)
+                if audio_response:
+                    await websocket.send_text(json.dumps({
+                        "type": "audio",
+                        "audio_event": {
+                            "audio_base_64": audio_response
+                        }
+                    }))
         
     except Exception as e:
         print(f"[Agent] Audio processing error: {e}")
@@ -306,7 +241,8 @@ async def speech_to_text_with_plugin(audio_data: bytes, agent_name: str) -> Opti
     """Convert speech to text using active ASR plugin"""
     try:
         # Get ASR plugin for this agent
-        asr_plugin = active_plugins.get(agent_name, active_plugins.get(agent_name))
+        asr_plugin = active_plugins_asr.get(agent_name, active_plugins_asr.get(agent_name))
+        print(active_plugins_asr)
         
         if not asr_plugin:
             print(f"[STT] No ASR plugin found for agent: {agent_name}")
@@ -326,7 +262,7 @@ async def speech_to_text_with_plugin(audio_data: bytes, agent_name: str) -> Opti
         print(f"[STT] Error: {e}")
         return None
 
-async def generate_ai_response(text: str, agent_name: str) -> str:
+async def generate_ai_response(text: str, agent_name: str, session_id: str) -> str:
     """Generate AI response using model"""
     try:
         # Use existing model to generate response
@@ -336,29 +272,38 @@ async def generate_ai_response(text: str, agent_name: str) -> str:
                 "prompt": text,
                 "enable_function_calling": True,
             },
-            session_id=agent_name,
+            session_id=session_id,
             use_history=True
         )
         
         response = model.action(
             action_request.command,
             **action_request.params,
-            session_id=action_request.session_id,
+            session_id=session_id,
             use_history=action_request.use_history
         )
-        
         # Extract text from response
         if isinstance(response, dict):
-            return response.get("response", "I'm sorry, I couldn't process that.")
-        return str(response) if response else "I'm sorry, I couldn't process that."
+            return response.get("response") or response.get("text") or "I'm sorry, I couldn't process that."
+        else:
+            return str(response) if response else "I'm sorry, I couldn't process that."
         
     except Exception as e:
         print(f"[AI] Response generation error: {e}")
         return "I'm sorry, there was an error processing your request."
 
-async def text_to_speech(text: str) -> Optional[str]:
+async def text_to_speech(text: str, agent_name: str) -> Optional[str]:
     """Convert text to speech and return base64 audio"""
-    return None
+    tts_plugin = active_plugins_tts.get(agent_name, active_plugins_tts.get(agent_name))
+    if not tts_plugin:
+        print(f"[TTS] No TTS plugin found for agent: {agent_name}")
+        return None
+    
+    audio = await asyncio.to_thread(tts_plugin.synthesize, text)
+    buffer = tts_plugin.audio_to_bytes(audio)
+    audio_b64 = base64.b64encode(buffer).decode("ascii")
+    
+    return audio_b64
 
 def convert_audio_to_wav(audio_data: bytes) -> str:
     """Convert audio data to WAV file for ASR plugin"""
@@ -420,11 +365,20 @@ async def init_agent(request: InitAgentRequest):
         
         # Initialize ASR plugin if provided
         if request.asr_config:
-            asr_plugin = create_plugin(
+            asr_plugin = create_asr_plugin(
                 request.asr_config.plugin_type,
                 **request.asr_config.config_model
             ).load()
-            active_plugins[request.agent_name] = asr_plugin
+            active_plugins_asr[request.agent_name] = asr_plugin
+        
+        if request.tts_config:
+            tts_plugin = create_tts_plugin(
+                request.tts_config.plugin_type,
+                **request.tts_config.config_model
+            ).load()
+            print(tts_plugin)
+            active_plugins_tts[request.agent_name] = tts_plugin
+            print(active_plugins_tts)
         
         return {"success": True, "result": result, "asr_enabled": bool(request.asr_config)}
     
@@ -776,10 +730,6 @@ async def handle_sse(request: Request):
 
 def cleanup():
     print("Stopping child apps...")
-    if stt_proc:
-        stt_proc.terminate()
-    if tts_proc:
-        tts_proc.terminate()
 
 
 atexit.register(cleanup)

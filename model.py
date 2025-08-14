@@ -1206,7 +1206,8 @@ class MCPToolsManager:
         # Validate parameters
         validation = MCPToolsManager.validate_parameters(tool_name, params)
         if not validation["valid"]:
-            return {"error": f"Validation failed: {validation['message']}"}
+            print("error", f"Validation failed: {validation['message']}")
+            return False
         
         mcp_name = tool_name.split('.')[0]
         actual_tool_name = '.'.join(tool_name.split('.')[1:])
@@ -1255,9 +1256,11 @@ class MCPToolsManager:
                 return result
                 
         except concurrent.futures.TimeoutError:
-            return {"error": "Thread execution timed out"}
+            print("error", "Thread execution timed out")
+            return False
         except Exception as e:
-            return {"error": f"Setup failed: {str(e)}"}
+            print("error", f"Setup failed: {str(e)}")
+            return False
     
     @staticmethod
     def validate_parameters(tool_name: str, params: Dict[str, Any]):
@@ -1456,50 +1459,51 @@ class MyModel(AIxBlockMLBase):
                     
                     # Execute tool directly
                     result = MCPToolsManager.call_remote_tool_sse(tool_name, tool_params)
-                    print(result)
-                    
-                    # Process result
-                    if hasattr(result, 'content'):
-                        if hasattr(result.content, '__iter__') and not isinstance(result.content, str):
-                            content_text = ""
-                            for item in result.content:
-                                if hasattr(item, 'text'):
-                                    content_text += item.text
-                                elif isinstance(item, dict) and 'text' in item:
-                                    content_text += item['text']
-                                else:
-                                    content_text += str(item)
-                            final_response = content_text
+                    print("result", result)
+                    if result and result != False:
+                        print("Process result")
+                        # Process result
+                        if hasattr(result, 'content'):
+                            if hasattr(result.content, '__iter__') and not isinstance(result.content, str):
+                                content_text = ""
+                                for item in result.content:
+                                    if hasattr(item, 'text'):
+                                        content_text += item.text
+                                    elif isinstance(item, dict) and 'text' in item:
+                                        content_text += item['text']
+                                    else:
+                                        content_text += str(item)
+                                final_response = content_text
+                            else:
+                                final_response = str(result.content)
+                        elif isinstance(result, dict):
+                            if "error" in result:
+                                final_response = ""
+                            else:
+                                content = result.get('content', str(result))
+                                # Extract meaningful content from JSON
+                                if '"output":' in content:
+                                    try:
+                                        import re
+                                        output_match = re.search(r'"output":\s*"([^"]*(?:\\.[^"]*)*)"', content)
+                                        if output_match:
+                                            content = output_match.group(1).replace('\\"', '"').replace('\\n', '\n')
+                                    except:
+                                        pass
+                                final_response = content
                         else:
-                            final_response = str(result.content)
-                    elif isinstance(result, dict):
-                        if "error" in result:
-                            final_response = f"❌ Tool error: {result['error']}"
-                        else:
-                            content = result.get('content', str(result))
-                            # Extract meaningful content from JSON
-                            if '"output":' in content:
-                                try:
-                                    import re
-                                    output_match = re.search(r'"output":\s*"([^"]*(?:\\.[^"]*)*)"', content)
-                                    if output_match:
-                                        content = output_match.group(1).replace('\\"', '"').replace('\\n', '\n')
-                                except:
-                                    pass
-                            final_response = content
-                    else:
-                        final_response = str(result)
-                    
-                    # Record function call
-                    function_calls = [{
-                        "tool": tool_name,
-                        "params": tool_params,
-                        "result": {"content": final_response, "success": "error" not in str(result).lower()},
-                        "success": True,
-                        "extraction_method": extraction_method
-                    }]
-                    
-                    thinking = f"Enhanced tool extraction: {tool_name} via {extraction_method}. KB context: {len(kb_context)} chars"
+                            final_response = str(result)
+                        
+                        # Record function call
+                        function_calls = [{
+                            "tool": tool_name,
+                            "params": tool_params,
+                            "result": {"content": final_response, "success": "error" not in str(result).lower()},
+                            "success": True,
+                            "extraction_method": extraction_method
+                        }]
+                        
+                        thinking = f"Enhanced tool extraction: {tool_name} via {extraction_method}. KB context: {len(kb_context)} chars"
             # 🤖 Fallback to model generation if no tool detected
             if not final_response:
                 logger.info("🤖 No tool detected or tool failed, using model generation")
@@ -1628,6 +1632,7 @@ class MyModel(AIxBlockMLBase):
                 "success": True,
                 "message": "predict completed successfully",
                 "result": predictions,
+                "text": final_response,
                 "session_id": session_id,
                 "metadata": {
                     "model_id": model_id,
