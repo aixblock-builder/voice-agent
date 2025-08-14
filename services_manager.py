@@ -13,7 +13,7 @@ import shutil
 import queue
 
 tts_proc = None
-tts_folder = "text_to_speech"
+tts_folder = "tts"
 
 def ensure_portaudio_installed():
     if shutil.which("apt-get") is None:
