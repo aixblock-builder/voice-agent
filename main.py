@@ -30,6 +30,15 @@ import atexit
 import base64
 from starlette.websockets import WebSocket
 
+# Thêm vào đầu file, sau các import
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
+# Global TTS instance management
+_global_tts_instances = {}
+_instance_lock = threading.Lock()
+_tts_thread_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="tts_pool")
+
 app = FastAPI(
     title="My model",
     openapi_url="/swagger.json",
@@ -200,24 +209,31 @@ async def handle_audio_chunk(websocket: WebSocket, data: Dict[str, Any], state: 
                     "user_transcript": transcript
                 }
             }))
+
+            await asyncio.sleep(0.05)
             
-            # Generate AI response
-            ai_response = await generate_ai_response(transcript, state.agent_name, state.conversation_id)
+            # # Generate AI response
+            # # Generate AI response
+            # ai_response = await generate_ai_response(transcript, state.agent_name, state.conversation_id)
+            ai_response = "It's interesting you mentioned the queen and the sister pair—sounds like a mystery! If you're Jessica and you've been watching through a cold one, maybe you're part of a larger story or a group with a secret? Are you looking for help with the queen's case, or do you need assistance with the sister duo's investigation?"
             print("====ai_response====", ai_response)
             
             # Send agent response text
             await websocket.send_text(json.dumps({
                 "type": "agent_response",
                 "agent_response_event": {
-                    "agent_response": ai_response
+                    "agent_response": str(ai_response)
                 }
             }))
+
+            await asyncio.sleep(0.05)
             
-            # Generate and send audio response
-            chunk_size = 200  # Điều chỉnh theo nhu cầu
+            # # Generate and send audio response
+            chunk_size = 80  # Điều chỉnh theo nhu cầu
             chunks = [ai_response[i:i+chunk_size] for i in range(0, len(ai_response), chunk_size)]
 
             for chunk in chunks:
+                print("====chunk====", chunk)
                 audio_response = await text_to_speech(chunk, state.agent_name)
                 if audio_response:
                     await websocket.send_text(json.dumps({
@@ -226,6 +242,7 @@ async def handle_audio_chunk(websocket: WebSocket, data: Dict[str, Any], state: 
                             "audio_base_64": audio_response
                         }
                     }))
+                    await asyncio.sleep(0.1)
         
     except Exception as e:
         print(f"[Agent] Audio processing error: {e}")
@@ -270,7 +287,7 @@ async def generate_ai_response(text: str, agent_name: str, session_id: str) -> s
             command="predict",
             params={
                 "prompt": text,
-                "enable_function_calling": True,
+                "enable_function_calling": False,
             },
             session_id=session_id,
             use_history=True
@@ -282,6 +299,7 @@ async def generate_ai_response(text: str, agent_name: str, session_id: str) -> s
             session_id=session_id,
             use_history=action_request.use_history
         )
+        
         # Extract text from response
         if isinstance(response, dict):
             return response.get("response") or response.get("text") or "I'm sorry, I couldn't process that."
@@ -292,18 +310,45 @@ async def generate_ai_response(text: str, agent_name: str, session_id: str) -> s
         print(f"[AI] Response generation error: {e}")
         return "I'm sorry, there was an error processing your request."
 
+def get_tts_instance(agent_name: str):
+    """Lấy TTS instance từ global storage"""
+    return _global_tts_instances.get(agent_name)
+
+def set_tts_instance(agent_name: str, tts_instance):
+    """Set TTS instance vào global storage với thread safety"""
+    with _instance_lock:
+        _global_tts_instances[agent_name] = tts_instance
+        print(f"[TTS] Global instance set for agent: {agent_name}")
+
 async def text_to_speech(text: str, agent_name: str) -> Optional[str]:
-    """Convert text to speech and return base64 audio"""
-    tts_plugin = active_plugins_tts.get(agent_name, active_plugins_tts.get(agent_name))
-    if not tts_plugin:
-        print(f"[TTS] No TTS plugin found for agent: {agent_name}")
+    """Convert text to speech using pre-loaded instance"""
+    def _synthesize():
+        # Lấy instance từ global storage trước
+        tts_plugin = get_tts_instance(agent_name)
+        
+        # Fallback về active_plugins_tts nếu không có trong global
+        if not tts_plugin:
+            tts_plugin = active_plugins_tts.get(agent_name)
+            if tts_plugin:
+                # Lưu vào global cho lần sau
+                set_tts_instance(agent_name, tts_plugin)
+        
+        if not tts_plugin:
+            print(f"[TTS] No TTS plugin found for agent: {agent_name}")
+            return None
+        
+        # Synthesize (model đã load sẵn)
+        audio = tts_plugin.synthesize(text)
+        buffer = tts_plugin.audio_to_bytes(audio)
+        return base64.b64encode(buffer).decode("ascii")
+    
+    try:
+        loop = asyncio.get_event_loop()
+        audio_b64 = await loop.run_in_executor(_tts_thread_pool, _synthesize)
+        return audio_b64
+    except Exception as e:
+        print(f"[TTS] Error: {e}")
         return None
-    
-    audio = await asyncio.to_thread(tts_plugin.synthesize, text)
-    buffer = tts_plugin.audio_to_bytes(audio)
-    audio_b64 = base64.b64encode(buffer).decode("ascii")
-    
-    return audio_b64
 
 def convert_audio_to_wav(audio_data: bytes) -> str:
     """Convert audio data to WAV file for ASR plugin"""
@@ -347,7 +392,7 @@ async def send_ping_to_clients():
 @app.on_event("startup")
 async def startup_event():
     asyncio.create_task(send_ping_to_clients())
-    
+
 @app.post("/init_agent")
 async def init_agent(request: InitAgentRequest):
     """Initialize agent with ASR plugin"""
@@ -376,9 +421,10 @@ async def init_agent(request: InitAgentRequest):
                 request.tts_config.plugin_type,
                 **request.tts_config.config_model
             ).load()
-            print(tts_plugin)
             active_plugins_tts[request.agent_name] = tts_plugin
-            print(active_plugins_tts)
+            set_tts_instance(request.agent_name, tts_plugin)  # Lưu vào global
+            
+            print(f"[TTS] TTS loaded and ready for agent: {request.agent_name}")
         
         return {"success": True, "result": result, "asr_enabled": bool(request.asr_config)}
     
