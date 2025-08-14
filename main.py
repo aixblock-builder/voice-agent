@@ -559,6 +559,9 @@ async def send_ping_to_clients():
         except Exception as e:
             print(f"[Ping] Error: {e}")
 
+@app.get("/stream-audio-test")
+async def stream_audio_test():
+    return FileResponse("audio-streaming-test.html")
 
 @app.post("/init_agent")
 async def init_agent(request: InitAgentRequest):

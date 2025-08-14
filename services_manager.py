@@ -174,7 +174,7 @@ async def start_service(
     services[entry.id] = entry
 
     # chạy hàm blocking ở thread → không khoá event loop
-    entry.server_task = await asyncio.create_task(asyncio.to_thread(run_fn_blocking, config))
+    entry.server_task = asyncio.create_task(asyncio.to_thread(run_fn_blocking, config))
     return entry.id
 
 async def service_status(service_id: str, health_timeout: float = 30.0) -> dict:
