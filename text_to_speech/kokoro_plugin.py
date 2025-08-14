@@ -3,7 +3,7 @@ import os
 import requests
 import numpy as np
 from pathlib import Path
-from tts_base import TtsBase, register_tts_plugin
+from .tts_base import TtsBase, register_tts_plugin
 
 try:
     from kokoro_onnx import Kokoro
