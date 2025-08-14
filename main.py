@@ -27,7 +27,7 @@ from services_manager import (
     ensure_portaudio_installed,
 )
 from starlette.routing import Mount
-from model import MyModel, mcp
+from model import MyModel, mcp, active_llm_plugins
 from speech_to_text.plugin_loader import *
 from speech_to_text.asr_base import create_plugin
 from utils.vad_utils import (
@@ -102,10 +102,14 @@ class ASRConfig(BaseModel):
     plugin_type: str  # "whisper", "huggingface", etc
     config_model: Dict[str, Any]  # model-specific config
 
+class ConfigLlmModel(BaseModel):
+    model_id: str
+    config_tokenizer: Dict[str, Any] = {}  # tokenizer-specific config
+    config_pipeline: Dict[str, Any] = {}  # pipeline-specific config
+
 class LLMConfig(BaseModel):
-    plugin_type: str  # "gpt", "llama", etc
-    config_model: Dict[str, Any]
-    
+    plugin_type: str  # "gpt", "llama", "qwen", etc
+    config_model: ConfigLlmModel
 
 class TTSConfig(BaseModel):
     engine_name: str  # "kokoro", "coqui", etc
@@ -122,7 +126,7 @@ class InitAgentRequest(BaseModel):
     storageConnection: Optional[Dict[str, Any]] = None
     asr_config: Optional[ASRConfig] = None
     tts_config: Optional[TTSConfig] = None
-
+    llm_config: Optional[LLMConfig] = None
 
 class ConversationState:
     def __init__(self, agent_name: str):
@@ -574,16 +578,15 @@ async def init_agent(request: InitAgentRequest):
     """Initialize agent with ASR plugin"""
     try:
         # Original MCP logic
-        result = model.action(
-            "mcp_register_payload",
-            name=request.name,
-            endpoint=request.endpoint,
-            auth_token=request.auth_token,
-            tools=request.tools,
-            memoryConnection=request.memoryConnection,
-            storageConnection=request.storageConnection,
-        )
-        print("[Agent] Initializing agent:", request.agent_name)
+        # result = model.action(
+        #     "mcp_register_payload",
+        #     name=request.name,
+        #     endpoint=request.endpoint,
+        #     auth_token=request.auth_token,
+        #     tools=request.tools,
+        #     memoryConnection=request.memoryConnection,
+        #     storageConnection=request.storageConnection,
+        # )
 
         # Initialize ASR plugin if provided
         if request.asr_config:
@@ -592,7 +595,6 @@ async def init_agent(request: InitAgentRequest):
             ).load()
             active_plugins[request.agent_name] = asr_plugin
         if request.tts_config:
-            print("[Agent] Initializing TTS service")
             tts_id = await start_service(
                 name="tts",
                 config=request.tts_config.dict(),
@@ -600,10 +602,17 @@ async def init_agent(request: InitAgentRequest):
                 run_fn_blocking=run_tts_app_func,
                 stop_fn=stop_tts_app,
             )
+        if request.llm_config:
+            llm_plugin = create_plugin(
+                request.llm_config.plugin_type,
+                **request.llm_config.config_model,
+            ).load()
+            active_llm_plugins[request.agent_name] = llm_plugin
         return {
             "success": True,
-            "result": result,
+            # "result": result,
             "asr_enabled": bool(request.asr_config),
+            "llm_enabled": bool(request.llm_config),
             "tts_id": tts_id if request.tts_config else None,
         }
 
