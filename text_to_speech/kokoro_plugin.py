@@ -16,7 +16,7 @@ class KokoroPlugin(TtsBase):
         super().__init__(**kwargs)
         self.model_path = kwargs.get("model_path", "kokoro-v0_19.onnx")
         self.voices_path = kwargs.get("voices_path", "voices.bin")
-        self.voice = kwargs.get("voice", "af")  # Default voice
+        self.voice = kwargs.get("voice", "af_sarah")  # Default voice
         self.speed = kwargs.get("speed", 1.0)  # Tốc độ phù hợp cho GPU
         self.lang = kwargs.get("lang", "en-us")
         self.kokoro = None
@@ -49,6 +49,8 @@ class KokoroPlugin(TtsBase):
             voices_path=self.voices_path
         )
         print(f"Kokoro loaded on {self.device}")
+        
+        return self
     
     def synthesize(self, text: str, **kwargs) -> np.ndarray:
         """Synthesize speech from text"""

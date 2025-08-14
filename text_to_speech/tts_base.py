@@ -42,7 +42,7 @@ class TtsBase(ABC):
         sf.write(buffer, audio, self.sample_rate, format='WAV')
         return buffer.getvalue()
 
-def create_tts_plugin(name: str, **kwargs) -> TtsBase:
+def create_plugin(name: str, **kwargs) -> TtsBase:
     if name not in TTS_PLUGIN_REGISTRY:
         raise ValueError(f"TTS Plugin {name} not found")
     return TTS_PLUGIN_REGISTRY[name](**kwargs)
