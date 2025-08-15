@@ -25,7 +25,8 @@ import atexit
 # Import handlers
 from handlers.stt_handler import initialize_asr_plugin, get_active_asr_plugins, cleanup_asr_plugin, speech_to_text_with_plugin
 from handlers.tts_handler import initialize_tts_plugin, get_active_tts_plugins, cleanup_tts_plugin, shutdown_tts_thread_pool
-from handlers.llm_handler import generate_ai_response, initialize_llm_plugin, get_active_llm_plugins, cleanup_llm_plugin
+from handlers.llm_handler import initialize_llm_plugin, get_active_llm_plugins, cleanup_llm_plugin, generate_ai_response
+
 from handlers.websocket_handler import (
     handle_init_conversation,
     handle_audio_chunk,

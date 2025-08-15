@@ -19,6 +19,7 @@ from transformers import (
     BitsAndBytesConfig,
 )
 import gc
+from handlers.llm_handler import active_llm_plugins
 
 
 # ------------------------------------------------------------------------------
@@ -46,7 +47,6 @@ model_loaded_demo = False
 # Parameters for model deployment
 pipe_prediction = None
 tokenizer = None
-active_llm_plugins: Dict[str, LlmBase] = {}
 
 
 class MyModel(AIxBlockMLBase):
