@@ -1,6 +1,7 @@
+from ctypes import Union
 import json
 import os
-from typing import Any, Dict, Iterator
+from typing import Any, Dict, Iterator, List, Optional
 
 import gradio as gr
 from knowleadge_base_manager import KNOWLEDGE_BASES, KnowledgeBaseManager
@@ -20,6 +21,7 @@ from transformers import (
 )
 import gc
 from handlers.llm_handler import active_llm_plugins
+from pydantic import BaseModel
 
 
 # ------------------------------------------------------------------------------
@@ -48,6 +50,12 @@ model_loaded_demo = False
 pipe_prediction = None
 tokenizer = None
 
+class ActionRequest(BaseModel):
+    command: str
+    params: Dict[str, Any]
+    doc_file_urls: Optional[Union[str, List[str]]] = None
+    session_id: Optional[str] = None
+    use_history: Optional[bool] = True
 
 class MyModel(AIxBlockMLBase):
     """Main model class with enhanced MCP tools management"""

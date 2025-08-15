@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, RedirectResponse, JSONResponse
 from mcp.server.sse import SseServerTransport
 from pydantic import BaseModel
 from starlette.routing import Mount
-from model import MyModel, mcp
+from model import MyModel, mcp, ActionRequest
 from utils.chat_history import ChatHistoryManager
 import json
 from starlette.websockets import WebSocket
@@ -66,13 +66,6 @@ app.add_middleware(
 
 model = MyModel()
 chat_history = ChatHistoryManager(persist_directory="./chroma_db_history")
-
-class ActionRequest(BaseModel):
-    command: str
-    params: Dict[str, Any]
-    doc_file_urls: Optional[Union[str, List[str]]] = None
-    session_id: Optional[str] = None
-    use_history: Optional[bool] = True
 
 class ASRConfig(BaseModel):
     plugin_type: str  # "whisper", "huggingface", etc
