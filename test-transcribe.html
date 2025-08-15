@@ -172,7 +172,7 @@
         }
 
         if (data.type === "audio") {
-          const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+          const bytes = Uint8Array.from(atob(data.audio_event.audio_base_64), c => c.charCodeAt(0));
           handleAudioData(audio_bytes);
         }
       };
