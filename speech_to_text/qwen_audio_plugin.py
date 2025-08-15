@@ -17,6 +17,7 @@ class QwenAudioPlugin(AsrBase):
         self.language = kwargs.get("language", None)
         self.model = None
         self.processor = None
+        self.SAMPLE_RATE = 16000  # Qwen expects 16kHz audio
 
     def load(self):
         self.processor = AutoProcessor.from_pretrained(self.model_id)
