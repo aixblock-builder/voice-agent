@@ -1,7 +1,7 @@
 import asyncio
 from contextlib import asynccontextmanager, suppress
 import os
-from typing import Any, Dict, Optional, List, Union, AsyncIterator
+from typing import Any, Dict, Optional, List, AsyncIterator
 import requests
 from pathlib import Path
 

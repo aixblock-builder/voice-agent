@@ -1,7 +1,6 @@
-from ctypes import Union
 import json
 import os
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Union
 
 import gradio as gr
 from knowleadge_base_manager import KNOWLEDGE_BASES, KnowledgeBaseManager
