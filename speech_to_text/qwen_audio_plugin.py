@@ -29,23 +29,26 @@ class QwenAudioPlugin(AsrBase):
 
         # Handle file path, numpy array, or base64 bytes
         if isinstance(audio, str):
-            if audio.startswith('data:') or len(audio) > 255:  # Base64 string
-                # Decode base64 to bytes
+            if audio.startswith('data:') or len(audio) > 255:
+                # Base64 string
                 audio_bytes = base64.b64decode(audio)
-                # Convert bytes to numpy array (assuming 16kHz, 16-bit PCM)
-                audio_data = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+                audio_np = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
             else:
-                # File path - load and preprocess
-                audio_data = self.preprocess(audio)
+                # File path -> preprocess trả về np.ndarray
+                audio_np = self.preprocess(audio)
         elif isinstance(audio, bytes):
-            # Raw bytes - convert to numpy array
-            audio_data = np.frombuffer(audio, dtype=np.int16).astype(np.float32) / 32768.0
+            audio_np = np.frombuffer(audio, dtype=np.int16).astype(np.float32) / 32768.0
+        elif isinstance(audio, np.ndarray):
+            audio_np = audio.astype(np.float32, copy=False)
         else:
-            # Assume it's numpy array or file path from converter
-            audio_data = self.preprocess(audio)
+            raise TypeError(f"Unsupported audio type: {type(audio)}")
 
-        audio_tensors = [torch.tensor(chunk, dtype=torch.float32) for chunk in audio_data]
-        final_waveform = torch.cat(audio_tensors, dim=1)
+        # Đảm bảo shape là (1, T) cho model
+        if audio_np.ndim == 1:
+            audio_np = np.expand_dims(audio_np, axis=0)  # (1, T)
+
+        # Convert sang torch.Tensor
+        final_waveform = torch.from_numpy(audio_np)
         path = self.save_buffer_to_mp3(final_waveform, self.SAMPLE_RATE)
 
         messages = [
