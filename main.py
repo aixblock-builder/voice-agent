@@ -32,7 +32,6 @@ from utils.chat_history import ChatHistoryManager
 import json
 from starlette.websockets import WebSocket
 import atexit
-import base64
 
 # Import handlers
 from handlers.stt_handler import initialize_asr_plugin, get_active_asr_plugins, cleanup_asr_plugin
@@ -43,9 +42,6 @@ from handlers.websocket_handler import (
     handle_audio_chunk,
     handle_pong,
     send_ping_to_clients,
-    websocket_connections,
-    agent_connections,
-    ConversationState,
     cleanup_connection
 )
 
