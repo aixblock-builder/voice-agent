@@ -76,6 +76,7 @@ async def generate_ai_response(text: str, agent_name: str, session_id: str, mode
             params={
                 "prompt": text,
                 "enable_function_calling": False,
+                "agent_name": agent_name,
             },
             session_id=session_id,
             use_history=True

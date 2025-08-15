@@ -414,11 +414,9 @@ async def handle_speech_complete(websocket: WebSocket, state: ConversationState,
             }))
             
             # Generate AI response
-            # ai_response = await generate_ai_response(
-            #     transcript, state.agent_name, state.conversation_id, model_instance
-            # )
-            ai_response = "This is a shorter test response for better interrupt testing. It should be easier to interrupt with fewer chunks. Testing the new improved system now."
-            
+            ai_response = await generate_ai_response(
+                transcript, state.agent_name, state.conversation_id, model_instance
+            )
             # Use unified response system with improved interrupt handling
             await send_agent_response_unified(websocket, ai_response, state, is_first_message=False)
             
