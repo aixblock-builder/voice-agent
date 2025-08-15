@@ -172,7 +172,7 @@
         }
 
         if (data.type === "audio") {
-          const bytes = Uint8Array.from(atob(data.audio_event.audio_base_64), c => c.charCodeAt(0));
+          const audio_bytes = Uint8Array.from(atob(data.audio_event.audio_base_64), c => c.charCodeAt(0));
           handleAudioData(audio_bytes);
         }
       };
@@ -192,7 +192,7 @@
       const pcmData = new Uint8Array(byteArray);
       const wavBuffer = addWavHeader(pcmData, 22050, 1); // adjust sample rate/channels as needed
       const blob = new Blob([wavBuffer], { type: "audio/wav" });
-      audioQueue.push({ blob, sentence });
+      audioQueue.push({ blob });
 
       if (audioQueue.length === 1) {
         playNextAudio();
@@ -204,12 +204,10 @@
 
       isPlaying = true;
 
-      const { blob, sentence } = audioQueue.shift();
+      const { blob } = audioQueue.shift();
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
 
-      document.getElementById("result").textContent += "Assistant: " + sentence + "\n";
-      log(`Playing: ${sentence}`);
       audio.onended = () => {
         URL.revokeObjectURL(url);
         isPlaying = false;
