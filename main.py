@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional, List, AsyncIterator
 import requests
 from pathlib import Path
 
+from entities import InitAgentRequest, ActionRequest
 from fastapi import (
     FastAPI,
     HTTPException,
@@ -16,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, JSONResponse
 from mcp.server.sse import SseServerTransport
 from starlette.routing import Mount
-from model import MyModel, mcp, ActionRequest
+from model import MyModel, mcp
 from utils.chat_history import ChatHistoryManager
 import json
 from starlette.websockets import WebSocket
@@ -66,7 +67,6 @@ app.add_middleware(
 
 model = MyModel()
 chat_history = ChatHistoryManager(persist_directory="./chroma_db_history")
-
 
 
 @app.websocket("/conversation")

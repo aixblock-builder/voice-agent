@@ -1,5 +1,12 @@
-from pydantic import BaseModel
-from typing import Dict, Any, List, Optional
+from pydantic import BaseModel, Field
+from typing import Dict, Any, List, Optional, Union
+
+class ActionRequest(BaseModel):
+    command: str
+    params: Dict[str, Any]
+    doc_file_urls: Optional[Union[str, List[str]]] = None
+    session_id: Optional[str] = None
+    use_history: Optional[bool] = True
 
 class ASRConfig(BaseModel):
     plugin_type: str  # "whisper", "huggingface", etc

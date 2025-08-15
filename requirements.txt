@@ -70,9 +70,10 @@ qdrant_client
 psycopg2-binary
 librosa
 openai-whisper==20240930
-kokoro-onnx
+kokoro-onnx[gpu]
 onnxruntime-gpu==1.21.1
 silero_vad
 webrtcvad
-faster_whisper
 pydub
+webrtcvad-wheels
+faster_whisper

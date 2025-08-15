@@ -4,35 +4,56 @@ from transformers import Qwen2AudioForConditionalGeneration, AutoProcessor
 import torch
 from pydub import AudioSegment
 from silero_vad import load_silero_vad
+from typing import Union
+import numpy as np
+import base64
+import librosa
 
 @register_plugin("qwen_audio")
 class QwenAudioPlugin(AsrBase):
-    def __init__(self, model_size: str = "base", **kwargs):
+    def __init__(self, model_id: str = "base", **kwargs):
         super().__init__(**kwargs)
-        self.model_size = model_size
+        self.model_id = model_id
         self.language = kwargs.get("language", None)
         self.model = None
         self.processor = None
-        self.SAMPLE_RATE = 16000
-        self.FRAME_SIZE = 512
-        self.BYTES_PER_SAMPLE = 2
-        self.vad_model = load_silero_vad()
 
     def load(self):
-        self.processor = AutoProcessor.from_pretrained("Qwen/Qwen2-Audio-7B-Instruct")
-        self.model = Qwen2AudioForConditionalGeneration.from_pretrained("Qwen/Qwen2-Audio-7B-Instruct", device_map="auto")
+        self.processor = AutoProcessor.from_pretrained(self.model_id)
+        self.model = Qwen2AudioForConditionalGeneration.from_pretrained(self.model_id, device_map="auto")
         return self
     
-    def predict(self, audio):
+    def predict(self, audio: Union[str, np.ndarray, bytes]) -> str:
         if self.model is None or self.processor is None:
             self.load()
-    
+
+        # Handle file path, numpy array, or base64 bytes
+        if isinstance(audio, str):
+            if audio.startswith('data:') or len(audio) > 255:  # Base64 string
+                # Decode base64 to bytes
+                audio_bytes = base64.b64decode(audio)
+                # Convert bytes to numpy array (assuming 16kHz, 16-bit PCM)
+                audio_data = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+            else:
+                # File path - load and preprocess
+                audio_data = self.preprocess(audio)
+        elif isinstance(audio, bytes):
+            # Raw bytes - convert to numpy array
+            audio_data = np.frombuffer(audio, dtype=np.int16).astype(np.float32) / 32768.0
+        else:
+            # Assume it's numpy array or file path from converter
+            audio_data = self.preprocess(audio)
+
+        final_waveform = torch.cat(audio_data, dim=1)
+        path = self.save_buffer_to_mp3(final_waveform, self.SAMPLE_RATE)
+
         messages = [
             {"role": "system", "content": "You are Qwen, created by Alibaba Cloud. You are a speech recognition assistant."},
             {
                 "role": "user",
                 "content": [
                     {"type": "audio", "audio_url": path},
+                    {"type": "text", "text": "What does the person say?"},
                 ],
             },
         ]
@@ -57,29 +78,6 @@ class QwenAudioPlugin(AsrBase):
         response = self.processor.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         print("response", str(response))
         return response
-
-    def process_frame(self, frame_bytes: bytes) -> tuple[bool, torch.Tensor | None]:
-        """
-        Xử lý một frame âm thanh duy nhất (bytes) và thực hiện VAD.
-        Đây là một hàm thuần túy, không có tác dụng phụ.
-        """
-        try:
-            # Chuyển đổi bytes thành tensor float32 đã được chuẩn hóa
-            samples = np.frombuffer(frame_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-            waveform = torch.tensor(samples, dtype=torch.float32).unsqueeze(0)  # Shape: (1, FRAME_SIZE)
-        except Exception as e:
-            print(f"Lỗi giải mã khung âm thanh: {e}")
-            return False, None
-
-        # Chạy VAD
-        try:
-            # item() > 0.5 sẽ trả về True nếu có tiếng nói
-            is_speech = vad_model(waveform, SAMPLE_RATE).item() > 0.5
-        except Exception as e:
-            print(f"Lỗi mô hình VAD: {e}")
-            return False, waveform
-
-        return is_speech, waveform
 
     def save_buffer_to_mp3(self, waveform: torch.Tensor, sample_rate: int) -> str:
 
