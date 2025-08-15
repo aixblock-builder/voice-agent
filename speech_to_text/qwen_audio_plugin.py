@@ -86,7 +86,7 @@ class QwenAudioPlugin(AsrBase):
                     if ele["type"] == "audio":
                         audios.append(librosa.load(ele["audio_url"], sr=self.processor.feature_extractor.sampling_rate)[0])
         
-        inputs = self.processor(text=text, audios=audios, return_tensors="pt", padding=True)
+        inputs = self.processor(text=text, audio=audios, return_tensors="pt", padding=True)
         inputs = {k: v.to("cuda") if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
 
         generate_ids = self.model.generate(
