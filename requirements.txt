@@ -74,3 +74,4 @@ kokoro-onnx
 onnxruntime-gpu==1.21.1
 silero_vad
 webrtcvad
+faster_whisper
