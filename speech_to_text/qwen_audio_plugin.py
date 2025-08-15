@@ -1,6 +1,6 @@
 from .asr_base import AsrBase, register_plugin
 import uuid
-from transformers import Qwen2AudioForConditionalGeneration, AutoProcessor
+from transformers import Qwen2AudioForConditionalGeneration, AutoProcessor, BitsAndBytesConfig
 import torch
 from pydub import AudioSegment
 from silero_vad import load_silero_vad
@@ -20,8 +20,23 @@ class QwenAudioPlugin(AsrBase):
         self.SAMPLE_RATE = 16000  # Qwen expects 16kHz audio
 
     def load(self):
+        if torch.cuda.is_bf16_supported():
+            compute_dtype = torch.bfloat16
+        else:
+            compute_dtype = torch.float16
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=compute_dtype,
+            bnb_4bit_use_double_quant=True,
+        )
         self.processor = AutoProcessor.from_pretrained(self.model_id)
-        self.model = Qwen2AudioForConditionalGeneration.from_pretrained(self.model_id, device_map="auto")
+        self.model = Qwen2AudioForConditionalGeneration.from_pretrained(
+            self.model_id,
+            device_map="auto",                                              
+            quantization_config=bnb_config,
+            torch_dtype=compute_dtype,
+        )
         return self
     
     def predict(self, audio: Union[str, np.ndarray, bytes]) -> str:
