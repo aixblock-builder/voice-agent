@@ -1,4 +1,5 @@
 import asyncio
+from itertools import tee
 import json
 import base64
 import time
@@ -20,28 +21,33 @@ class TTSQueueItem:
         self.duration = duration
 
 class VADProcessor:
-    """WebRTC VAD processor with improved stability"""
+    """WebRTC VAD processor with improved stability and reset capability"""
     def __init__(self, sample_rate: int = 16000, frame_duration: int = 20):
-        self.vad = webrtcvad.Vad(mode=2)  # Mode 2 for better balance
+        self.vad = webrtcvad.Vad(mode=2)
         self.sample_rate = sample_rate
         self.frame_duration = frame_duration
         self.frame_size = int(sample_rate * frame_duration / 1000)
         
+        self.reset_state()
+        
+        # Optimized thresholds for real-time response
+        self.silence_threshold = 25  # 500ms
+        self.speech_threshold = 2    # 40ms
+        self.max_speech_frames = 15000
+        
+        # Buffer for smooth detection
+        self.history_size = 3
+        
+        print(f"[VAD] Initialized - Silence: {self.silence_threshold * 20}ms, Speech: {self.speech_threshold * 20}ms")
+
+    def reset_state(self):
+        """Reset VAD state completely"""
         self.speech_frames = []
         self.silence_count = 0
         self.speech_count = 0
         self.is_speaking = False
-        
-        # Tối ưu threshold cho real-time response
-        self.silence_threshold = 40  # Giảm từ 75 xuống 40 (800ms -> 400ms)
-        self.speech_threshold = 3    # Tăng từ 2 lên 3 để ít false positive
-        self.max_speech_frames = 15000
-        
-        # Buffer để smooth detection
         self.voice_history = []
-        self.history_size = 5
-        
-        print(f"[VAD] Initialized - Silence timeout: {self.silence_threshold * 20}ms, Speech threshold: {self.speech_threshold * 20}ms")
+        print("[VAD] 🔄 State reset")
 
     def process_audio(self, audio_data: bytes) -> tuple[bool, bool, bool]:
         try:
@@ -55,14 +61,14 @@ class VADProcessor:
             # WebRTC VAD detection
             raw_voice = self.vad.is_speech(audio_data, self.sample_rate)
             
-            # Smooth detection với history buffer
+            # Smooth detection with history buffer
             self.voice_history.append(raw_voice)
             if len(self.voice_history) > self.history_size:
                 self.voice_history.pop(0)
             
-            # Voice detected nếu ít nhất 60% frames gần đây có voice
+            # Voice detected if at least 50% of recent frames have voice
             voice_ratio = sum(self.voice_history) / len(self.voice_history)
-            is_voice = voice_ratio >= 0.6
+            is_voice = voice_ratio >= 0.5
             
             speech_started = speech_ended = False
             
@@ -87,7 +93,7 @@ class VADProcessor:
                 self.silence_count += 1
                 
                 if self.is_speaking and self.silence_count >= self.silence_threshold:
-                    min_speech_frames = 8  # Giảm từ 10 xuống 8
+                    min_speech_frames = 6
                     if len(self.speech_frames) >= min_speech_frames:
                         self.is_speaking = False
                         speech_ended = True
@@ -115,90 +121,255 @@ class ConversationState:
         self.conversation_id = f"conv_{agent_name}_{time.time()}"
         self.vad_processor = VADProcessor()
         
-        # TTS Queue system
+        # TTS Queue system with improved interrupt handling
         self.tts_queue: List[TTSQueueItem] = []
         self.is_playing = False
-        self.should_interrupt = False
         self.queue_task: Optional[asyncio.Task] = None
-        self.current_play_task: Optional[asyncio.Task] = None
         
-        # Interrupt management
+        # IMPROVED: Event-based interrupt system for instant response
+        self._interrupt_event = asyncio.Event()
         self.interrupt_lock = asyncio.Lock()
-        self.last_interrupt_time = 0
-
-async def send_agent_response_direct(websocket: WebSocket, text: str, state: ConversationState):
-    """Send agent response trực tiếp như logic cũ (cho first_message)"""
-    try:
-        state.is_playing = True
-        state.should_interrupt = False
         
-        # Send text response
+        # Add processing lock to prevent race conditions
+        self.processing_lock = asyncio.Lock()
+
+    @property
+    def should_interrupt(self) -> bool:
+        """Immediate interrupt check"""
+        return self._interrupt_event.is_set()
+    
+    def set_interrupt(self):
+        """Set interrupt flag immediately"""
+        self._interrupt_event.set()
+        print(f"[Interrupt] ⚡ INTERRUPT FLAG SET")
+    
+    def clear_interrupt(self):
+        """Clear interrupt flag"""
+        self._interrupt_event.clear()
+        print(f"[Interrupt] ✅ INTERRUPT FLAG CLEARED")
+
+def split_into_smart_chunks(text: str, max_chunk_length: int = 40) -> List[str]:
+    """Split text into smart chunks by words, not cutting mid-word"""
+    # First split by sentences
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    chunks = []
+    
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+            
+        # If sentence is shorter than max_chunk_length, keep as is
+        if len(sentence) <= max_chunk_length:
+            chunks.append(sentence)
+            continue
+        
+        # Split long sentences into chunks by words
+        words = sentence.split()
+        current_chunk = []
+        current_length = 0
+        
+        for word in words:
+            # Check if adding this word would exceed max_length
+            word_length = len(word) + (1 if current_chunk else 0)  # +1 for space
+            
+            if current_length + word_length > max_chunk_length and current_chunk:
+                # Finish current chunk
+                chunks.append(' '.join(current_chunk))
+                current_chunk = [word]
+                current_length = len(word)
+            else:
+                # Add word to current chunk
+                current_chunk.append(word)
+                current_length += word_length
+        
+        # Add final chunk if remaining
+        if current_chunk:
+            chunks.append(' '.join(current_chunk))
+    
+    # Filter empty chunks
+    return [chunk.strip() for chunk in chunks if chunk.strip()]
+
+def calculate_audio_duration(audio_b64: str, sample_rate: int = 24000) -> float:
+    """Calculate audio duration from base64 with higher accuracy"""
+    try:
+        audio_bytes = base64.b64decode(audio_b64)
+        # Assume 16-bit PCM
+        num_samples = len(audio_bytes) // 2
+        duration = num_samples / sample_rate
+        return max(duration, 0.05)  # Minimum 50ms
+    except:
+        # Fallback based on length
+        return max(len(audio_b64) * 0.0006, 0.05)
+
+async def interrupt_agent_instant(state: ConversationState):
+    """INSTANT interrupt with zero-delay response and proper cleanup"""
+    print(f"[Interrupt] 🚨 IMMEDIATE INTERRUPT TRIGGERED")
+    
+    async with state.interrupt_lock:
+        was_playing = state.is_playing
+        queue_length = len(state.tts_queue)
+        
+        if (state.is_playing or state.tts_queue) and not state.should_interrupt:
+            print(f"[Interrupt] ⚡ STOPPING: playing={was_playing}, queue={queue_length}")
+            
+            # Set interrupt flag immediately
+            state.set_interrupt()
+            
+            # Clear queue immediately
+            state.tts_queue.clear()
+            state.is_playing = False  # Force stop playing state
+            print(f"[Interrupt] 🧹 Cleared {queue_length} items + stopped playback")
+            
+            # Cancel current task if running
+            if state.queue_task and not state.queue_task.done():
+                print("[Interrupt] 🛑 Cancelling queue task")
+                state.queue_task.cancel()
+                try:
+                    await state.queue_task
+                except asyncio.CancelledError:
+                    print("[Interrupt] 🛑 Task cancelled successfully")
+            
+            # Reset VAD state to ensure fresh detection
+            state.vad_processor.reset_state()
+            
+            # Reset flag after short delay
+            asyncio.create_task(reset_interrupt_flag(state))
+        else:
+            print(f"[Interrupt] ⏭️  No action needed - already interrupted or not playing")
+
+async def reset_interrupt_flag(state: ConversationState):
+    """Reset interrupt flag after short delay"""
+    await asyncio.sleep(0.06)  # 60ms - even shorter
+    state.clear_interrupt()
+
+async def process_tts_queue_instant(websocket: WebSocket, state: ConversationState):
+    """Improved TTS queue processor with frequent yield for audio processing"""
+    try:
+        print(f"[TTS Queue] 🚀 Starting with {len(state.tts_queue)} items")
+        
+        while state.tts_queue:
+            # IMMEDIATE interrupt check before each item
+            if state.should_interrupt:
+                print("[TTS Queue] ⚡ INSTANT INTERRUPT - STOPPING")
+                state.is_playing = False
+                state.tts_queue.clear()
+                return
+            
+            queue_item = state.tts_queue.pop(0)
+            state.is_playing = True
+            
+            # Send audio chunk
+            await websocket.send_text(json.dumps({
+                "type": "audio",
+                "audio_event": {"audio_base_64": queue_item.audio_b64}
+            }))
+            
+            print(f"[TTS Queue] 🔊 Playing: '{queue_item.text[:40]}...' ({queue_item.duration:.2f}s)")
+            
+            # CRITICAL: Use shorter intervals with frequent yielding to event loop
+            total_wait = 0
+            interval = 0.01  # 10ms intervals for ultra-responsive interrupt
+            
+            while total_wait < queue_item.duration:
+                # Check interrupt immediately
+                if state.should_interrupt:
+                    print(f"[TTS Queue] ⚡ INTERRUPTED during playback after {total_wait:.2f}s")
+                    state.is_playing = False
+                    state.tts_queue.clear()
+                    return
+                
+                # Short sleep with yield to allow audio processing
+                await asyncio.sleep(interval)
+                total_wait += interval
+                
+                # Yield control to event loop more frequently
+                if int(total_wait * 100) % 5 == 0:  # Every 50ms
+                    await asyncio.sleep(0)  # Yield to event loop
+            
+            state.is_playing = False
+            print(f"[TTS Queue] ✅ Completed: '{queue_item.text[:30]}...'")
+            
+            # Very short gap with immediate interrupt check
+            if state.should_interrupt:
+                print("[TTS Queue] ⚡ INTERRUPTED during gap")
+                state.tts_queue.clear()
+                return
+                
+            # Tiny gap with yield
+            await asyncio.sleep(0.02)  # 20ms gap
+            await asyncio.sleep(0)     # Yield to event loop
+            
+        print("[TTS Queue] 🏁 Queue completed normally")
+        
+    except asyncio.CancelledError:
+        print("[TTS Queue] 🛑 Task cancelled")
+        state.is_playing = False
+        state.tts_queue.clear()
+        raise
+    except Exception as e:
+        print(f"[TTS Queue] ❌ Error: {e}")
+    finally:
+        state.is_playing = False
+
+async def send_agent_response_unified(websocket: WebSocket, text: str, state: ConversationState, is_first_message: bool = False):
+    """Unified response handler with improved interrupt handling"""
+    try:
+        # Send text response immediately
         await websocket.send_text(json.dumps({
             "type": "agent_response",
             "agent_response_event": {"agent_response": text}
         }))
         
-        # Stream TTS chunks như logic cũ
-        await stream_tts_chunks_direct(websocket, text, state)
+        # Split into smaller chunks for better interrupt granularity
+        chunks = split_into_smart_chunks(text, max_chunk_length=40)
+        print(f"[TTS] 📝 Processing {len(chunks)} chunks {'(FIRST MESSAGE)' if is_first_message else ''}")
         
-    except asyncio.CancelledError:
-        print("[TTS Direct] 🛑 Cancelled by user interrupt")
-    finally:
-        state.is_playing = False
-
-async def stream_tts_chunks_direct(websocket: WebSocket, text: str, state: ConversationState):
-    """Stream TTS chunks trực tiếp như logic cũ với frequent interrupt checking"""
-    chunk_size = 100
-    chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
-    
-    for i, chunk in enumerate(chunks):
-        # Check interrupt mỗi chunk
-        if state.should_interrupt:
-            print(f"[TTS Direct] 🛑 Interrupted at chunk {i+1}/{len(chunks)}")
-            return
-            
-        try:
-            # Generate TTS
-            audio_b64 = await text_to_speech(chunk, state.agent_name)
-            
-            # Check interrupt sau khi generate xong
-            if state.should_interrupt:
-                print(f"[TTS Direct] 🛑 Interrupted after TTS generation")
-                return
-                
-            if audio_b64:
-                await websocket.send_text(json.dumps({
-                    "type": "audio",
-                    "audio_event": {"audio_base_64": audio_b64}
-                }))
-                
-                # Brief pause với interrupt checking
-                for j in range(10):  # 100ms total, check mỗi 10ms
-                    if state.should_interrupt:
-                        print(f"[TTS Direct] 🛑 Interrupted during pause")
-                        return
-                    await asyncio.sleep(0.01)
+        if is_first_message:
+            # FIRST MESSAGE: Send immediately without queue
+            for chunk in chunks:
+                if not chunk:
+                    continue
                     
-        except Exception as e:
-            print(f"[TTS Direct] ❌ Error: {e}")
-            return
-
-def split_into_sentences(text: str) -> List[str]:
-    """Tách text thành các câu"""
-    sentences = re.split(r'[.!?]+(?:\s+|$)', text.strip())
-    return [s.strip() for s in sentences if s.strip()]
-
-def calculate_audio_duration(audio_b64: str, sample_rate: int = 24000) -> float:
-    """Tính thời gian audio từ base64 với accuracy cao hơn"""
-    try:
-        audio_bytes = base64.b64decode(audio_b64)
-        # Giả định 16-bit PCM
-        num_samples = len(audio_bytes) // 2
-        duration = num_samples / sample_rate
-        return max(duration, 0.1)  # Minimum 0.1s
-    except:
-        # Fallback dựa trên length
-        return max(len(audio_b64) * 0.0008, 0.1)
+                audio_b64 = await text_to_speech(chunk, state.agent_name)
+                if audio_b64:
+                    await websocket.send_text(json.dumps({
+                        "type": "audio",
+                        "audio_event": {"audio_base_64": audio_b64}
+                    }))
+                    print(f"[TTS First] ⚡ Sent immediately: '{chunk[:40]}...'")
+        else:
+            # NORMAL RESPONSES: Generate and queue with interrupt checking
+            async with state.processing_lock:  # Prevent race conditions
+                for i, chunk in enumerate(chunks):
+                    # Check interrupt before each chunk generation
+                    if state.should_interrupt:
+                        print(f"[TTS] 🛑 Interrupted while generating chunk {i+1}/{len(chunks)}")
+                        return
+                        
+                    if not chunk:
+                        continue
+                        
+                    # Generate TTS for chunk
+                    audio_b64 = await text_to_speech(chunk, state.agent_name)
+                    
+                    # Check interrupt after TTS generation
+                    if state.should_interrupt:
+                        print(f"[TTS] 🛑 Interrupted after TTS gen for chunk {i+1}")
+                        return
+                        
+                    if audio_b64:
+                        duration = calculate_audio_duration(audio_b64)
+                        queue_item = TTSQueueItem(chunk, audio_b64, duration)
+                        state.tts_queue.append(queue_item)
+                        print(f"[TTS] ➕ Queued: '{chunk[:35]}...' ({duration:.2f}s)")
+                
+                # Start playing queue if not interrupted and no task running
+                if not state.should_interrupt and (not state.queue_task or state.queue_task.done()):
+                    state.queue_task = asyncio.create_task(process_tts_queue_instant(websocket, state))
+            
+    except Exception as e:
+        print(f"[TTS] ❌ Error: {e}")
 
 async def handle_init_conversation(websocket: WebSocket, data: Dict[str, Any]) -> ConversationState:
     """Handle conversation initialization"""
@@ -214,153 +385,14 @@ async def handle_init_conversation(websocket: WebSocket, data: Dict[str, Any]) -
         "conversation_id": state.conversation_id,
     }))
     
-    # Send first message với logic cũ (gửi ngay không qua queue)
+    # Send first message with immediate delivery (no queue)
     if first_message:
-        await send_agent_response_direct(websocket, first_message, state)
+        await send_agent_response_unified(websocket, first_message, state, is_first_message=True)
     
     return state
 
-async def queue_agent_response(websocket: WebSocket, text: str, state: ConversationState):
-    """Queue agent response với TTS và immediate interrupt checking"""
-    try:
-        # Check interrupt trước khi bắt đầu
-        if state.should_interrupt:
-            print("[TTS Queue] 🛑 Interrupted before queuing")
-            return
-            
-        # Send text response ngay
-        await websocket.send_text(json.dumps({
-            "type": "agent_response",
-            "agent_response_event": {"agent_response": text}
-        }))
-        
-        # Tách thành sentences
-        sentences = split_into_sentences(text)
-        print(f"[TTS Queue] 📝 Queuing {len(sentences)} sentences")
-        
-        for i, sentence in enumerate(sentences):
-            # Check interrupt giữa mỗi sentence
-            if state.should_interrupt:
-                print(f"[TTS Queue] 🛑 Interrupted while generating sentence {i+1}/{len(sentences)}")
-                return
-                
-            if not sentence:
-                continue
-                
-            # Generate TTS
-            audio_b64 = await text_to_speech(sentence, state.agent_name)
-            
-            # Check interrupt sau TTS generation
-            if state.should_interrupt:
-                print(f"[TTS Queue] 🛑 Interrupted after TTS gen for sentence {i+1}")
-                return
-                
-            if audio_b64:
-                duration = calculate_audio_duration(audio_b64)
-                queue_item = TTSQueueItem(sentence, audio_b64, duration)
-                state.tts_queue.append(queue_item)
-        
-        # Start queue processor nếu chưa chạy và không bị interrupt
-        if not state.should_interrupt and (not state.queue_task or state.queue_task.done()):
-            state.queue_task = asyncio.create_task(process_tts_queue(websocket, state))
-            
-    except Exception as e:
-        print(f"[TTS Queue] ❌ Error: {e}")
-
-async def process_tts_queue(websocket: WebSocket, state: ConversationState):
-    """Xử lý hàng chờ TTS với ultra-responsive interrupt checking"""
-    try:
-        print(f"[TTS Queue] 🚀 Starting queue processor with {len(state.tts_queue)} items")
-        
-        while state.tts_queue and not state.should_interrupt:
-            queue_item = state.tts_queue.pop(0)
-            
-            # Final check trước khi play
-            if state.should_interrupt:
-                print("[TTS Queue] 🛑 Interrupted before playing item")
-                break
-            
-            state.is_playing = True
-            
-            # Send audio
-            await websocket.send_text(json.dumps({
-                "type": "audio",
-                "audio_event": {"audio_base_64": queue_item.audio_b64}
-            }))
-            
-            print(f"[TTS Queue] 🔊 Playing: '{queue_item.text[:40]}...' ({queue_item.duration:.2f}s)")
-            
-            # Ultra-frequent interrupt checking during playback
-            total_wait_time = 0
-            check_interval = 0.02  # 20ms - matching client chunk rate!
-            
-            while total_wait_time < queue_item.duration:
-                if state.should_interrupt:
-                    print(f"[TTS Queue] 🛑 INTERRUPTED at {total_wait_time:.2f}s/{queue_item.duration:.2f}s")
-                    state.is_playing = False
-                    state.tts_queue.clear()  # Clear remaining queue
-                    return
-                    
-                await asyncio.sleep(check_interval)
-                total_wait_time += check_interval
-            
-            state.is_playing = False
-            print(f"[TTS Queue] ✅ Completed: '{queue_item.text[:30]}...'")
-            
-            # Ultra-short gap với frequent checking
-            gap_time = 0
-            gap_duration = 0.1  # Giảm xuống 100ms
-            while gap_time < gap_duration:
-                if state.should_interrupt:
-                    print("[TTS Queue] 🛑 Interrupted during gap")
-                    state.tts_queue.clear()
-                    return
-                await asyncio.sleep(0.02)  # 20ms checks
-                gap_time += 0.02
-            
-        print(f"[TTS Queue] 🏁 Queue finished. Remaining: {len(state.tts_queue)}")
-            
-    except asyncio.CancelledError:
-        print("[TTS Queue] 🛑 Task cancelled")
-    except Exception as e:
-        print(f"[TTS Queue] ❌ Error: {e}")
-    finally:
-        state.is_playing = False
-        state.tts_queue.clear()
-
-async def interrupt_agent(state: ConversationState):
-    """Ngắt agent với debouncing để tránh spam"""
-    async with state.interrupt_lock:
-        current_time = time.time()
-        
-        # Debounce: chỉ process interrupt nếu đã > 100ms từ lần trước
-        if current_time - state.last_interrupt_time < 0.1:
-            return
-            
-        state.last_interrupt_time = current_time
-        
-        if (state.is_playing or state.tts_queue) and not state.should_interrupt:
-            print("[Interrupt] 🛑 USER SPEAKING - IMMEDIATE STOP")
-            state.should_interrupt = True
-            
-            # Clear queue ngay lập tức
-            state.tts_queue.clear()
-            
-            # Cancel current tasks
-            if state.queue_task and not state.queue_task.done():
-                state.queue_task.cancel()
-            
-            # Reset state sau delay ngắn
-            asyncio.create_task(reset_interrupt_flag(state))
-
-async def reset_interrupt_flag(state: ConversationState):
-    """Reset interrupt flag sau khi cleanup"""
-    await asyncio.sleep(0.3)  # Giảm từ 0.5 xuống 0.3
-    state.should_interrupt = False
-    print("[Interrupt] 🔄 Ready for new responses")
-
 async def handle_speech_complete(websocket: WebSocket, state: ConversationState, model_instance):
-    """Process completed speech với improved error handling"""
+    """Process completed speech with improved error handling"""
     speech_audio = state.vad_processor.get_speech_audio()
     if not speech_audio:
         return
@@ -382,18 +414,20 @@ async def handle_speech_complete(websocket: WebSocket, state: ConversationState,
             }))
             
             # Generate AI response
-            ai_response = await generate_ai_response(
-                transcript, state.agent_name, state.conversation_id, model_instance
-            )
-            # Send response
-            await send_agent_response_direct(websocket, ai_response, state)
+            # ai_response = await generate_ai_response(
+            #     transcript, state.agent_name, state.conversation_id, model_instance
+            # )
+            ai_response = "This is a shorter test response for better interrupt testing. It should be easier to interrupt with fewer chunks. Testing the new improved system now."
+            
+            # Use unified response system with improved interrupt handling
+            await send_agent_response_unified(websocket, ai_response, state, is_first_message=False)
             
     except Exception as e:
         print(f"[Speech] ❌ Processing error: {e}")
 
 async def handle_audio_chunk(websocket: WebSocket, data: Dict[str, Any], 
                            state: ConversationState, model_instance):
-    """Handle audio chunk với optimized interrupt logic"""
+    """Handle audio chunk with instant interrupt and debug logging"""
     audio_b64 = data.get("user_audio_chunk")
     if not audio_b64:
         return
@@ -401,28 +435,36 @@ async def handle_audio_chunk(websocket: WebSocket, data: Dict[str, Any],
     try:
         audio_data = base64.b64decode(audio_b64)
         
-        # Process với WebRTC VAD
+        # Process with WebRTC VAD
         voice_detected, speech_started, speech_ended = state.vad_processor.process_audio(audio_data)
         
-        # CRITICAL: Interrupt IMMEDIATELY khi detect voice
-        if voice_detected and (state.is_playing or state.tts_queue):
-            # Don't await - fire and forget để không block audio processing
-            asyncio.create_task(interrupt_agent(state))
+        # DEBUG: Log every voice detection for troubleshooting
+        if voice_detected:
+            playing_status = f"playing={state.is_playing}, queue={len(state.tts_queue)}, interrupted={state.should_interrupt}"
+            print(f"[Audio] 🔊 VOICE! {playing_status}")
+        
+        # ⚡ CRITICAL: INSTANT interrupt on ANY voice detection during playback
+        if voice_detected and (state.is_playing or state.tts_queue) and not state.should_interrupt:
+            print(f"[Audio] 🚨 TRIGGERING INTERRUPT!")
+            # Direct await instead of create_task for zero delay
+            await interrupt_agent_instant(state)
+        elif voice_detected and state.should_interrupt:
+            print(f"[Audio] ⏭️  Voice detected but already interrupted")
         
         if speech_started:
-            print("[VAD] 🎤 Speech detection started - interrupting agent")
+            print("[VAD] 🎤 Speech started")
             
         # Handle speech completion
         if speech_ended:
-            print("[VAD] ⏹️  Speech ended, processing...")
-            # Process trong background để không block audio stream
+            print("[VAD] ⏹️  Speech ended, processing transcript...")
+            # Process in background to not block audio stream
             asyncio.create_task(handle_speech_complete(websocket, state, model_instance))
             
     except Exception as e:
         print(f"[Audio] ❌ Processing error: {e}")
 
 async def websocket_conversation_endpoint_enhanced(websocket: WebSocket, model_instance):
-    """Enhanced websocket endpoint với ultra-responsive interrupt"""
+    """Enhanced websocket endpoint with instant interrupt response"""
     await websocket.accept()
     print("[WebSocket] 🔌 Connection accepted")
     
@@ -442,12 +484,15 @@ async def websocket_conversation_endpoint_enhanced(websocket: WebSocket, model_i
                     print(f"[WebSocket] 🚀 Conversation initialized: {conversation_state.conversation_id}")
                     
                 elif message_type == "user_audio_chunk" and conversation_state:
-                    # Handle audio chunks immediately - no queuing
+                    # ⚡ Process audio chunks immediately with instant interrupt
                     await handle_audio_chunk(websocket, data, conversation_state, model_instance)
                     
                 elif message_type == "stop_agent_speaking" and conversation_state:
                     print("[WebSocket] 🛑 Manual stop requested")
-                    await interrupt_agent(conversation_state)
+                    await interrupt_agent_instant(conversation_state)
+
+                elif message_type == "pong" and conversation_state:
+                    await handle_pong(data)
 
             except json.JSONDecodeError:
                 print("[WebSocket] ❌ Invalid JSON received")
