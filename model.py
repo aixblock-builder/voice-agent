@@ -20,7 +20,6 @@ from transformers import (
 )
 import gc
 from handlers.llm_handler import active_llm_plugins
-from pydantic import BaseModel
 
 
 # ------------------------------------------------------------------------------
@@ -48,13 +47,6 @@ model_loaded_demo = False
 # Parameters for model deployment
 pipe_prediction = None
 tokenizer = None
-
-class ActionRequest(BaseModel):
-    command: str
-    params: Dict[str, Any]
-    doc_file_urls: Optional[Union[str, List[str]]] = None
-    session_id: Optional[str] = None
-    use_history: Optional[bool] = True
 
 class MyModel(AIxBlockMLBase):
     """Main model class with enhanced MCP tools management"""
