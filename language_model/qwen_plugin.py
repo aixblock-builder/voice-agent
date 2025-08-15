@@ -5,7 +5,6 @@ import torch
 class QwenPlugin(LlmBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.language = kwargs.get("language", "en")
     
     def load(self, **kwargs):
         from transformers import AutoModelForCausalLM, AutoTokenizer

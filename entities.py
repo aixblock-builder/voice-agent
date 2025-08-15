@@ -16,6 +16,7 @@ class ConfigLlmModel(BaseModel):
     model_id: str
     config_tokenizer: Dict[str, Any] = {}  # tokenizer-specific config
     config_pipeline: Dict[str, Any] = {}  # pipeline-specific config
+    config_processor: Dict[str, Any] = {}  # processor-specific config
 
 class LLMConfig(BaseModel):
     plugin_type: str  # "gpt", "llama", "qwen", etc

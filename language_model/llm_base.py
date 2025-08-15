@@ -18,6 +18,7 @@ class LlmBase(ABC):
         self.config_pipeline = kwargs['config_pipeline'] if "config_pipeline" in kwargs else {}
         self.pipeline = None
         self.tokenizer = None
+        self.processor = None
         self.device = self._get_device()
     
     def _get_device(self):
