@@ -166,11 +166,15 @@
           document.getElementById("result").textContent += "You say: " + data.transcript + "\n";
         }
 
+        if (data.type === "agent_response") {
+          document.getElementById("result").textContent += "Assistant: " + data.agent_response_event.agent_response + "\n";
+          log(`AI Response: ${data.response}`);
+        }
+
         if (data.type === "audio") {
-          handleAudioData(data.audio, data.text, data.text_index, data.is_last);
-          if (data.is_last) {
-            log("Streaming từ server đã kết thúc.");
-          }
+          const buf = Buffer.from(data.audio_event.audio_base_64, "base64")
+          const audio_bytes = new Uint8Array(buf);
+          handleAudioData(audio_bytes);
         }
       };
     };
@@ -185,8 +189,7 @@
       }
     };
 
-    function handleAudioData(byteArray, sentence, index, isLast) {
-      log(`Received sentence ${index}: ${sentence}`);
+    function handleAudioData(byteArray) {
       const pcmData = new Uint8Array(byteArray);
       const wavBuffer = addWavHeader(pcmData, 22050, 1); // adjust sample rate/channels as needed
       const blob = new Blob([wavBuffer], { type: "audio/wav" });

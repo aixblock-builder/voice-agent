@@ -32,7 +32,8 @@ from handlers.websocket_handler import (
     handle_audio_chunk,
     handle_pong,
     send_ping_to_clients,
-    cleanup_connection
+    cleanup_connection,
+    stream_tts_chunks
 )
 from utils.vad_utils import BYTES_PER_SAMPLE, CHUNK_SIZE_BYTES, FRAME_SIZE, MAX_RECORDING_FRAMES, SILENCE_FRAMES_THRESHOLD, VAD_SPEECH_THRESHOLD, process_frame
 import torch
@@ -189,10 +190,26 @@ async def websocket_transcribe_endpoint(websocket: WebSocket):
                             ai_response = await generate_ai_response(
                                 transcript, conversation_state.agent_name, conversation_state.conversation_id, model
                             )
-                            await websocket.send_json({
-                                "type": "ai_response",
-                                "response": ai_response
-                            })
+                            if ai_response:
+                                try:
+                                    conversation_state.is_agent_speaking = True
+                                    conversation_state.should_interrupt = False
+                                    
+                                    # Send text response
+                                    await websocket.send_text(json.dumps({
+                                        "type": "agent_response",
+                                        "agent_response_event": {"agent_response": ai_response}
+                                    }))
+                                    
+                                    # Create and await TTS task
+                                    conversation_state.tts_task = asyncio.create_task(stream_tts_chunks(websocket, ai_response, conversation_state))
+                                    await conversation_state.tts_task
+                                    
+                                except asyncio.CancelledError:
+                                    print("[TTS] Cancelled by user interrupt")
+                                finally:
+                                    conversation_state.is_agent_speaking = False
+                                    conversation_state.tts_task = None
 
 
                         is_recording = False
