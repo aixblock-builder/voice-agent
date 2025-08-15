@@ -2,6 +2,15 @@ import asyncio
 from typing import Optional, Dict, Any
 from language_model.plugin_loader import *
 from language_model.llm_base import create_plugin
+from pydantic import BaseModel, Field
+from typing import Optional, Union, List
+
+class ActionRequest(BaseModel):
+    command: str
+    params: Dict[str, Any]
+    doc_file_urls: Optional[Union[str, List[str]]] = None
+    session_id: Optional[str] = None
+    use_history: Optional[bool] = True
 
 # Global storage for LLM plugins
 active_llm_plugins: Dict[str, Any] = {}
@@ -70,9 +79,7 @@ async def generate_ai_response_with_plugin(
 async def generate_ai_response(text: str, agent_name: str, session_id: str, model_instance) -> str:
     """Generate AI response using model (fallback function for compatibility)"""
     try:
-        # Use existing model to generate response
-        from model import ActionRequest
-        
+        # Use existing model to generate response        
         action_request = ActionRequest(
             command="predict",
             params={
