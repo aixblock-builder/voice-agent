@@ -661,6 +661,6 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=3000,
         # Bạn cũng có thể thêm các cấu hình khác ở đây
-        ssl_keyfile="ssl/key.pem",
-        ssl_certfile="ssl/cert.pem",
+        # ssl_keyfile="ssl/key.pem",
+        # ssl_certfile="ssl/cert.pem",
     )
