@@ -168,7 +168,7 @@
 
         if (data.type === "agent_response") {
           document.getElementById("result").textContent += "Assistant: " + data.agent_response_event.agent_response + "\n";
-          log(`AI Response: ${data.response}`);
+          log(`AI Response: ${data.agent_response_event.agent_response}`);
         }
 
         if (data.type === "audio") {
