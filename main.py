@@ -33,7 +33,7 @@ from handlers.websocket_handler import (
     handle_pong,
     send_ping_to_clients,
     cleanup_connection,
-    stream_tts_chunks_direct
+    send_agent_response_unified
 )
 from utils.vad_utils import BYTES_PER_SAMPLE, CHUNK_SIZE_BYTES, FRAME_SIZE, MAX_RECORDING_FRAMES, SILENCE_FRAMES_THRESHOLD, VAD_SPEECH_THRESHOLD, process_frame
 import torch
@@ -170,7 +170,7 @@ async def websocket_transcribe_endpoint(websocket: WebSocket):
                                     }))
                                     
                                     # Create and await TTS task
-                                    conversation_state.tts_task = asyncio.create_task(stream_tts_chunks_direct(websocket, ai_response, conversation_state))
+                                    conversation_state.tts_task = asyncio.create_task(send_agent_response_unified(websocket, ai_response, conversation_state))
                                     await conversation_state.tts_task
                                     
                                 except asyncio.CancelledError:
