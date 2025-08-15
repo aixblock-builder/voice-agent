@@ -100,7 +100,7 @@ class RealTimeAudioClient:
             "conversation_config_override": {
                 "agent": {
                     "prompt": {"prompt": "You are a helpful assistant"},
-                    "first_message": "Hello! I'm Jessica, please tell me anythin, listening..."
+                    "first_message": "Hello! I'm Jessica, please tell me anything, listening..."
                 }
             }
         }
@@ -297,12 +297,7 @@ class RealTimeAudioClient:
                         "type": "user_audio_chunk",
                         "user_audio_chunk": audio_b64
                     }
-                    
-                    if not self.ws.closed:
-                        await self.ws.send(json.dumps(audio_msg))
-                    else:
-                        print("❌ WebSocket closed")
-                        break
+                    await self.ws.send(json.dumps(audio_msg))
                         
                 except queue.Empty:
                     # Không có audio data, tiếp tục
