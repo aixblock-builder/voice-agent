@@ -382,15 +382,11 @@ async def handle_speech_complete(websocket: WebSocket, state: ConversationState,
             }))
             
             # Generate AI response
-            # ai_response = await generate_ai_response(
-            #     transcript, state.agent_name, state.conversation_id, model_instance
-            # )
-            ai_response = f"I heard you say: '{transcript}'. That's interesting! Let me help you with that. Thank you for your question."
-            
-            # Queue response với interrupt checking
-            await queue_agent_response(websocket, ai_response, state)
-        else:
-            print("[STT] 🔇 No valid transcript received")
+            ai_response = await generate_ai_response(
+                transcript, state.agent_name, state.conversation_id, model_instance
+            )
+            # Send response
+            await send_agent_response_direct(websocket, ai_response, state)
             
     except Exception as e:
         print(f"[Speech] ❌ Processing error: {e}")
