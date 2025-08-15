@@ -219,6 +219,10 @@ async def websocket_transcribe_endpoint(websocket: WebSocket):
         except RuntimeError as e:
             print(f"Could not send close frame (already disconnected by client): {e}")
 
+@app.get("/test-transcribe")
+async def test_transcribe_endpoint():
+    return FileResponse("test-transcribe.html")
+
 @app.post("/mcp/register")
 async def register_mcp_server(
     name: str = Body(...),
@@ -668,6 +672,6 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=1005,
         # Bạn cũng có thể thêm các cấu hình khác ở đây
-        # ssl_keyfile="ssl/key.pem",
-        # ssl_certfile="ssl/cert.pem",
+        ssl_keyfile="ssl/key.pem",
+        ssl_certfile="ssl/cert.pem",
     )
