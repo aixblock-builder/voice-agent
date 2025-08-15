@@ -188,7 +188,7 @@ async def websocket_transcribe_endpoint(websocket: WebSocket):
                         if transcript:                            
                             await websocket.send_json({
                                 "type": "transcript",
-                                "text": transcript
+                                "transcript": transcript
                             })
 
                         is_recording = False
