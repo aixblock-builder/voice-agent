@@ -25,7 +25,7 @@ import atexit
 # Import handlers
 from handlers.stt_handler import initialize_asr_plugin, get_active_asr_plugins, cleanup_asr_plugin, speech_to_text_with_plugin
 from handlers.tts_handler import initialize_tts_plugin, get_active_tts_plugins, cleanup_tts_plugin, shutdown_tts_thread_pool
-from handlers.llm_handler import initialize_llm_plugin, get_active_llm_plugins, cleanup_llm_plugin
+from handlers.llm_handler import generate_ai_response, initialize_llm_plugin, get_active_llm_plugins, cleanup_llm_plugin
 from handlers.websocket_handler import (
     handle_init_conversation,
     handle_audio_chunk,
@@ -138,6 +138,8 @@ async def websocket_transcribe_endpoint(websocket: WebSocket):
     recording_buffer = []
     is_recording = False
     silence_counter = 0
+    conversation_state = await handle_init_conversation(websocket, {})
+
     try:
         while True:
             try:
@@ -183,13 +185,21 @@ async def websocket_transcribe_endpoint(websocket: WebSocket):
                         final_waveform = torch.cat(recording_buffer, dim=1)
                         int16_tensor = (final_waveform.squeeze() * 32767).to(torch.int16)
                         audio_bytes = int16_tensor.cpu().numpy().tobytes()
-                        transcript = await speech_to_text_with_plugin(audio_bytes, "default_agent")
+                        transcript = await speech_to_text_with_plugin(audio_bytes, conversation_state.agent_name)
                         print(transcript)
                         if transcript:                            
                             await websocket.send_json({
                                 "type": "transcript",
                                 "transcript": transcript
                             })
+                            ai_response = await generate_ai_response(
+                                transcript, conversation_state.agent_name, conversation_state.conversation_id, model
+                            )
+                            await websocket.send_json({
+                                "type": "ai_response",
+                                "response": ai_response
+                            })
+
 
                         is_recording = False
                         recording_buffer.clear()
