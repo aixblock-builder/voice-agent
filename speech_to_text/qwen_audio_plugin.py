@@ -44,7 +44,8 @@ class QwenAudioPlugin(AsrBase):
             # Assume it's numpy array or file path from converter
             audio_data = self.preprocess(audio)
 
-        final_waveform = torch.cat(audio_data, dim=1)
+        audio_tensors = [torch.tensor(chunk, dtype=torch.float32) for chunk in audio_data]
+        final_waveform = torch.cat(audio_tensors, dim=1)
         path = self.save_buffer_to_mp3(final_waveform, self.SAMPLE_RATE)
 
         messages = [
