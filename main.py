@@ -15,7 +15,6 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, JSONResponse
 from mcp.server.sse import SseServerTransport
-from pydantic import BaseModel
 from starlette.routing import Mount
 from model import MyModel, mcp, ActionRequest
 from utils.chat_history import ChatHistoryManager
@@ -68,38 +67,7 @@ app.add_middleware(
 model = MyModel()
 chat_history = ChatHistoryManager(persist_directory="./chroma_db_history")
 
-class ASRConfig(BaseModel):
-    plugin_type: str  # "whisper", "huggingface", etc
-    config_model: Dict[str, Any]  # model-specific config
 
-class ConfigLlmModel(BaseModel):
-    model_id: str
-    config_tokenizer: Dict[str, Any] = {}  # tokenizer-specific config
-    config_pipeline: Dict[str, Any] = {}  # pipeline-specific config
-
-class LLMConfig(BaseModel):
-    plugin_type: str  # "gpt", "llama", "qwen", etc
-    config_model: ConfigLlmModel
-
-class TTSEngineConfig(BaseModel):
-    engine_name: str  # "kokoro", "coqui", etc
-    engine_kwargs: Dict[str, Any]  # engine-specific config
-
-class TTSConfig(BaseModel):
-    plugin_type: str  # "xtts2", "kokoro", etc
-    config_model: Dict[str, Any]  # model-specific config
-
-class InitAgentRequest(BaseModel):
-    name: str
-    agent_name: str
-    endpoint: str
-    auth_token: Optional[str] = None
-    tools: Optional[List[Dict[str, Any]]] = None
-    memoryConnection: Optional[Dict[str, Any]] = None
-    storageConnection: Optional[Dict[str, Any]] = None
-    asr_config: Optional[ASRConfig] = None
-    tts_config: Optional[TTSConfig] = None
-    llm_config: Optional[LLMConfig] = None
 
 @app.websocket("/conversation")
 async def websocket_conversation_endpoint(websocket: WebSocket):
