@@ -4,6 +4,33 @@ import torch
 from huggingface_hub import HfFolder
 from transformers import pipeline
 
+import subprocess
+import sys
+import torch
+
+if torch.cuda.is_available():
+   print("CUDA available, installing onnxruntime-gpu...")
+   
+   # Uninstall onnxruntime (both CPU and GPU versions)
+   subprocess.run([sys.executable, "-m", "pip", "uninstall", "onnxruntime", "onnxruntime-gpu", "-y"], 
+                  capture_output=True)
+   
+   # Clear cache and install GPU version
+   subprocess.run([sys.executable, "-m", "pip", "cache", "purge"], capture_output=True)
+   result = subprocess.run([sys.executable, "-m", "pip", "install", "onnxruntime-gpu==1.21.1", "--no-cache-dir"], 
+                          capture_output=True, text=True)
+   
+   if result.returncode != 0:
+       print(f"Failed to install onnxruntime-gpu: {result.stderr}")
+   else:
+       print("onnxruntime-gpu installed successfully")
+       
+       # Clear import cache
+       if 'onnxruntime' in sys.modules:
+           for module_name in list(sys.modules.keys()):
+               if module_name.startswith('onnxruntime'):
+                   del sys.modules[module_name]
+
 # Đặt token của bạn vào đây
 hf_token = os.getenv("HF_TOKEN", "hf_WRIKmOXGBHmhroIxiBUKnkOGTcFEnc" + "QXpj")
 # Lưu token vào local

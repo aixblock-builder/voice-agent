@@ -45,8 +45,6 @@ from handlers.websocket_handler import (
     cleanup_connection
 )
 
-ensure_portaudio_installed()
-
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Start ping task on startup
