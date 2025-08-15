@@ -1,7 +1,7 @@
 import asyncio
 from contextlib import asynccontextmanager, suppress
 import os
-from typing import Any, Dict, Optional, List, Union, AsyncIterator
+from typing import Any, Dict, Optional, List, AsyncIterator
 import requests
 from pathlib import Path
 
@@ -16,34 +16,28 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, JSONResponse
 from mcp.server.sse import SseServerTransport
 from pydantic import BaseModel
-from services_manager import (
-    cancel_service,
-    list_services,
-    service_status,
-    start_service,
-    run_tts_app_func,
-    stop_tts_app,
-    tts_proc,
-    ensure_portaudio_installed,
-)
 from starlette.routing import Mount
-from model import MyModel, mcp
+from model import MyModel, mcp, ActionRequest
 from utils.chat_history import ChatHistoryManager
 import json
 from starlette.websockets import WebSocket
 import atexit
-
 # Import handlers
-from handlers.stt_handler import initialize_asr_plugin, get_active_asr_plugins, cleanup_asr_plugin
+from handlers.stt_handler import initialize_asr_plugin, get_active_asr_plugins, cleanup_asr_plugin, speech_to_text_with_plugin
 from handlers.tts_handler import initialize_tts_plugin, get_active_tts_plugins, cleanup_tts_plugin, shutdown_tts_thread_pool
-from handlers.llm_handler import initialize_llm_plugin, get_active_llm_plugins, cleanup_llm_plugin
+from handlers.llm_handler import initialize_llm_plugin, get_active_llm_plugins, cleanup_llm_plugin, generate_ai_response
+
 from handlers.websocket_handler import (
     handle_init_conversation,
     handle_audio_chunk,
     handle_pong,
     send_ping_to_clients,
-    cleanup_connection
+    cleanup_connection,
+    stream_tts_chunks
 )
+from utils.vad_utils import BYTES_PER_SAMPLE, CHUNK_SIZE_BYTES, FRAME_SIZE, MAX_RECORDING_FRAMES, SILENCE_FRAMES_THRESHOLD, VAD_SPEECH_THRESHOLD, process_frame
+import torch
+from utils.voice_agent_utils import ensure_portaudio_installed
 
 ensure_portaudio_installed()
 
@@ -73,13 +67,6 @@ app.add_middleware(
 
 model = MyModel()
 chat_history = ChatHistoryManager(persist_directory="./chroma_db_history")
-
-class ActionRequest(BaseModel):
-    command: str
-    params: Dict[str, Any]
-    doc_file_urls: Optional[Union[str, List[str]]] = None
-    session_id: Optional[str] = None
-    use_history: Optional[bool] = True
 
 class ASRConfig(BaseModel):
     plugin_type: str  # "whisper", "huggingface", etc
@@ -139,22 +126,123 @@ async def websocket_conversation_endpoint(websocket: WebSocket):
         print(f"[Agent] Error: {e}")
         await websocket.close()
 
-@app.get("/tts/status")
-async def status_all():
-    return await list_services()
+@app.websocket("/ws/transcribe")
+async def websocket_transcribe_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    audio_buffer = bytearray()
+    recording_buffer = []
+    is_recording = False
+    silence_counter = 0
+    conversation_state = await handle_init_conversation(websocket, {})
 
-@app.get("/tts/status/{service_id}")
-async def status_one(service_id: str):
-    data = await service_status(service_id)
-    return data
+    try:
+        while True:
+            try:
+                data = await websocket.receive_bytes()
+                audio_buffer.extend(data)
 
-class CancelReq(BaseModel):
-    port: int | None = None
+                if len(audio_buffer) < CHUNK_SIZE_BYTES:
+                    continue
 
-@app.post("/tts/cancel/{service_id}")
-async def cancel_one(service_id: str, body: CancelReq):
-    data = await cancel_service(service_id, kill_by_port=body.port)
-    return data
+                chunk_bytes = audio_buffer[:CHUNK_SIZE_BYTES]
+                del audio_buffer[:CHUNK_SIZE_BYTES]
+
+                frames = []
+                speech_frame_count = 0
+                frame_byte_size = FRAME_SIZE * BYTES_PER_SAMPLE
+                for i in range(0, len(chunk_bytes), frame_byte_size):
+                    frame_data = chunk_bytes[i:i + frame_byte_size]
+                    if len(frame_data) < frame_byte_size:
+                        continue # Bỏ qua frame cuối nếu không đủ byte
+
+                    # Gọi hàm xử lý mới, thuần túy
+                    is_speech, waveform = process_frame(frame_data)
+                    
+                    if waveform is not None:
+                        frames.append(waveform)
+                        if is_speech:
+                            speech_frame_count += 1
+                
+                if not frames:
+                    continue
+
+                speech_probability = speech_frame_count / len(frames)
+
+                if is_recording:
+                    recording_buffer.extend(frames)
+                    if speech_probability > VAD_SPEECH_THRESHOLD:
+                        silence_counter = 0
+                    else:
+                        silence_counter += len(frames)
+
+                    if silence_counter > SILENCE_FRAMES_THRESHOLD or len(recording_buffer) > MAX_RECORDING_FRAMES:
+                        print(f"[*] Dừng ghi âm. Tổng số khung: {len(recording_buffer)}")
+                        final_waveform = torch.cat(recording_buffer, dim=1)
+                        int16_tensor = (final_waveform.squeeze() * 32767).to(torch.int16)
+                        audio_bytes = int16_tensor.cpu().numpy().tobytes()
+                        transcript = await speech_to_text_with_plugin(audio_bytes, conversation_state.agent_name)
+                        print(transcript)
+                        if transcript:                            
+                            await websocket.send_json({
+                                "type": "transcript",
+                                "transcript": transcript
+                            })
+                            ai_response = await generate_ai_response(
+                                transcript, conversation_state.agent_name, conversation_state.conversation_id, model
+                            )
+                            if ai_response:
+                                try:
+                                    conversation_state.is_agent_speaking = True
+                                    conversation_state.should_interrupt = False
+                                    
+                                    # Send text response
+                                    await websocket.send_text(json.dumps({
+                                        "type": "agent_response",
+                                        "agent_response_event": {"agent_response": ai_response}
+                                    }))
+                                    
+                                    # Create and await TTS task
+                                    conversation_state.tts_task = asyncio.create_task(stream_tts_chunks(websocket, ai_response, conversation_state))
+                                    await conversation_state.tts_task
+                                    
+                                except asyncio.CancelledError:
+                                    print("[TTS] Cancelled by user interrupt")
+                                finally:
+                                    conversation_state.is_agent_speaking = False
+                                    conversation_state.tts_task = None
+
+
+                        is_recording = False
+                        recording_buffer.clear()
+                        silence_counter = 0
+                
+                elif speech_probability > VAD_SPEECH_THRESHOLD:
+                    print("[*] Bắt đầu ghi âm...")
+                    is_recording = True
+                    recording_buffer.extend(frames)
+                    silence_counter = 0
+
+            except Exception as e:
+                raise e
+    except WebSocketDisconnect:
+        print("Client disconnected")
+    except Exception as e:
+        print(f"WebSocket error: {e}")
+        try:
+            await websocket.close()
+            print(f"Connection closed gracefully by server.")
+        except RuntimeError as e:
+            print(f"Could not send close frame (already disconnected by client): {e}")
+    finally:
+        try:
+            await websocket.close()
+            print(f"Connection closed gracefully by server.")
+        except RuntimeError as e:
+            print(f"Could not send close frame (already disconnected by client): {e}")
+
+@app.get("/test-transcribe")
+async def test_transcribe_endpoint():
+    return FileResponse("test-transcribe.html")
 
 @app.post("/mcp/register")
 async def register_mcp_server(
@@ -575,9 +663,6 @@ async def handle_sse(request: Request):
         )
 
 def cleanup():
-    print("Stopping child apps...")
-    if tts_proc:
-        tts_proc.terminate()
     # Cleanup handlers
     shutdown_tts_thread_pool()
 
@@ -606,8 +691,8 @@ if __name__ == "__main__":
     uvicorn.run(
         app,
         host="0.0.0.0",
-        port=3000,
+        port=1005,
         # Bạn cũng có thể thêm các cấu hình khác ở đây
-        # ssl_keyfile="ssl/key.pem",
-        # ssl_certfile="ssl/cert.pem",
+        ssl_keyfile="ssl/key.pem",
+        ssl_certfile="ssl/cert.pem",
     )
